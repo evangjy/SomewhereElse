@@ -5,6 +5,7 @@ var isEN: Bool = UserDefaults.standard.string(forKey: "ui").map { $0 == "en" } ?
 let enStr: [String: String] = [
   "未命名": "Untitled",
   "CR (旧 Mac)": "CR (classic Mac)",
+  "图片  |  %ld × %ld 像素  |  %@": "Image  |  %ld × %ld px  |  %@",
   "PDF(只读预览)": "PDF (read-only preview)",
   "无法作为文本打开:%@": "Can't open as text: %@",
   "文件看起来是二进制。": "This file looks like binary data.",
@@ -255,12 +256,35 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate {
     guard let d = try? Data(contentsOf: u) else { return }
     url = u; win.title = u.lastPathComponent; win.representedURL = u
     NSDocumentController.shared.noteNewRecentDocumentURL(u)
+    if ["png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "heic", "heif", "ico", "icns"].contains(u.pathExtension.lowercased()), let img = NSImage(contentsOf: u) {
+      let rep = img.representations.first
+      let w = max(1, rep?.pixelsWide ?? 0 > 0 ? rep!.pixelsWide : Int(img.size.width)), h = max(1, rep?.pixelsHigh ?? 0 > 0 ? rep!.pixelsHigh : Int(img.size.height))
+      let iv = NSImageView(frame: NSRect(x: 0, y: 0, width: w, height: h)); iv.image = img; iv.imageScaling = .scaleProportionallyUpOrDown
+      let sv = NSScrollView(); sv.documentView = iv; sv.allowsMagnification = true; sv.minMagnification = 0.05; sv.maxMagnification = 16
+      sv.hasVerticalScroller = true; sv.hasHorizontalScroller = true; sv.translatesAutoresizingMaskIntoConstraints = false
+      scroll.isHidden = true; area.addSubview(sv)
+      NSLayoutConstraint.activate([sv.topAnchor.constraint(equalTo: area.topAnchor), sv.leadingAnchor.constraint(equalTo: area.leadingAnchor),
+        sv.trailingAnchor.constraint(equalTo: area.trailingAnchor), sv.bottomAnchor.constraint(equalTo: area.bottomAnchor)])
+      sv.magnification = min(1, 900 / CGFloat(w), 600 / CGFloat(h))
+      status.stringValue = "\(u.pathExtension.uppercased())  |  \(w)×\(h) px  |  " + ByteCountFormatter.string(fromByteCount: Int64(d.count), countStyle: .file)
+      return
+    }
     if u.pathExtension.lowercased() == "pdf" {
       let p = PDFView(); p.document = PDFDocument(url: u); p.autoScales = true
       p.translatesAutoresizingMaskIntoConstraints = false; scroll.isHidden = true; status.stringValue = T("PDF(只读预览)")
       area.addSubview(p)
       NSLayoutConstraint.activate([p.topAnchor.constraint(equalTo: area.topAnchor), p.leadingAnchor.constraint(equalTo: area.leadingAnchor),
         p.trailingAnchor.constraint(equalTo: area.trailingAnchor), p.bottomAnchor.constraint(equalTo: area.bottomAnchor)])
+      return
+    }
+    if ["png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "heic", "heif", "ico", "icns"].contains(u.pathExtension.lowercased()), let img = NSImage(contentsOf: u) {
+      let v = NSImageView(image: img); v.imageScaling = .scaleProportionallyDown; v.animates = true
+      for o: NSLayoutConstraint.Orientation in [.horizontal, .vertical] { v.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: o); v.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: o) }
+      v.translatesAutoresizingMaskIntoConstraints = false; scroll.isHidden = true; area.addSubview(v)
+      NSLayoutConstraint.activate([v.topAnchor.constraint(equalTo: area.topAnchor), v.leadingAnchor.constraint(equalTo: area.leadingAnchor),
+        v.trailingAnchor.constraint(equalTo: area.trailingAnchor), v.bottomAnchor.constraint(equalTo: area.bottomAnchor)])
+      let px = (img.representations.first as? NSBitmapImageRep).map { ($0.pixelsWide, $0.pixelsHigh) } ?? (Int(img.size.width), Int(img.size.height))
+      status.stringValue = String(format: T("图片  |  %ld × %ld 像素  |  %@"), px.0, px.1, ByteCountFormatter.string(fromByteCount: Int64(d.count), countStyle: .file))
       return
     }
     guard let (s, e, b) = decode(d) else {

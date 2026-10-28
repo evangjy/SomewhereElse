@@ -18,7 +18,11 @@ cat > $A/Contents/Info.plist <<P
 <key>CFBundleDocumentTypes</key><array><dict>
 <key>CFBundleTypeName</key><string>Text</string><key>CFBundleTypeRole</key><string>Editor</string>
 <key>LSHandlerRank</key><string>Alternate</string>
+<<<<<<< HEAD
 <key>LSItemContentTypes</key><array><string>public.text</string><string>public.source-code</string><string>com.adobe.pdf</string><string>public.image</string></array>
+=======
+<key>LSItemContentTypes</key><array><string>public.text</string><string>public.source-code</string><string>com.adobe.pdf</string></array>
+>>>>>>> 95e0f5c7a0a722589a453c633f170cba247606c7
 </dict></array></dict></plist>
 P
 codesign --force --deep -s - $A 2>/dev/null || true

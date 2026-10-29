@@ -1,11 +1,14 @@
 import Cocoa
 import PDFKit
+import WebKit
 
 var isEN: Bool = UserDefaults.standard.string(forKey: "ui").map { $0 == "en" } ?? !(Locale.preferredLanguages.first ?? "").hasPrefix("zh")
 let enStr: [String: String] = [
   "未命名": "Untitled",
   "CR (旧 Mac)": "CR (classic Mac)",
   "图片  |  %ld × %ld 像素  |  %@": "Image  |  %ld × %ld px  |  %@",
+  "切换阅读/编辑模式": "Toggle Reading / Editing Mode",
+  "阅读模式(⌘. 返回编辑)": "Reading mode (⌘. to edit)",
   "PDF(只读预览)": "PDF (read-only preview)",
   "无法作为文本打开:%@": "Can't open as text: %@",
   "文件看起来是二进制。": "This file looks like binary data.",
@@ -27,7 +30,7 @@ let enStr: [String: String] = [
   "已替换 %ld 处": "%ld replaced",
   "有未保存的更改,仍要退出?": "You have unsaved changes. Quit anyway?",
   "退出": "Quit",
-  "退出 notapple": "Quit notapple",
+  "退出 Notapple": "Quit Notapple",
   "文件": "File",
   "新建标签页": "New Tab",
   "打开…": "Open…",
@@ -166,6 +169,154 @@ final class Gutter: NSRulerView {
   }
 }
 
+// MARK: Markdown → HTML(自带转换器,无第三方依赖;Markdown 中的原始 HTML 一律转义)
+func esc(_ s: String) -> String {
+  s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
+   .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
+}
+func rx(_ s: String, _ p: String, _ t: String) -> String { s.replacingOccurrences(of: p, with: t, options: .regularExpression) }
+func inline(_ t: String) -> String {
+  let s = esc(t) as NSString, re = try! NSRegularExpression(pattern: "`([^`]+)`")
+  var out = "", last = 0, stash: [String] = []
+  for m in re.matches(in: s as String, range: NSRange(location: 0, length: s.length)) {
+    out += s.substring(with: NSRange(location: last, length: m.range.location - last))
+    stash.append("<code>" + s.substring(with: m.range(at: 1)) + "</code>"); out += "\u{1}\(stash.count - 1)\u{1}"; last = NSMaxRange(m.range)
+  }
+  out += s.substring(from: last)
+  out = rx(out, #"!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;.*?&quot;)?\)"#, #"<img alt="$1" src="$2">"#)
+  out = rx(out, #"\[([^\]]+)\]\(([^)\s]+)(?:\s+&quot;.*?&quot;)?\)"#, #"<a href="$2">$1</a>"#)
+  out = rx(out, #"\*\*(.+?)\*\*|__(.+?)__"#, "<strong>$1$2</strong>")
+  out = rx(out, #"\*([^*\s][^*]*?)\*|\b_([^_]+)_\b"#, "<em>$1$2</em>")
+  out = rx(out, #"~~(.+?)~~"#, "<del>$1</del>")
+  for (k, c) in stash.enumerated() { out = out.replacingOccurrences(of: "\u{1}\(k)\u{1}", with: c) }
+  return out
+}
+func cells(_ l: String) -> [String] {
+  var p = l.trimmingCharacters(in: .whitespaces); if p.hasPrefix("|") { p.removeFirst() }; if p.hasSuffix("|") { p.removeLast() }
+  return p.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+}
+let listRE = try! NSRegularExpression(pattern: #"^([ \t]*)([-*+]|\d+[.)])[ \t]+(.*)$"#)
+func mdHTML(_ src: String) -> String {
+  let L = src.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n")
+  var o = "", i = 0, para: [String] = [], lists: [(String, Int)] = []
+  func flush() { if !para.isEmpty { o += "<p>" + rx(inline(para.joined(separator: "\n")), "  \n", "<br>\n") + "</p>\n"; para = [] } }
+  func closeLists() { while !lists.isEmpty { o += "</li></" + lists.removeLast().0 + ">\n" } }
+  while i < L.count {
+    let l = L[i], t = l.trimmingCharacters(in: .whitespaces)
+    if t.hasPrefix("```") || t.hasPrefix("~~~") {
+      flush(); closeLists(); let f = String(t.prefix(3)); var code: [String] = []; i += 1
+      while i < L.count, !L[i].trimmingCharacters(in: .whitespaces).hasPrefix(f) { code.append(L[i]); i += 1 }
+      o += "<pre><code>" + esc(code.joined(separator: "\n")) + "</code></pre>\n"; i += 1; continue
+    }
+    if t.isEmpty { flush(); i += 1; continue }
+    if t.range(of: #"^#{1,6}\s"#, options: .regularExpression) != nil {
+      flush(); closeLists(); let n = t.prefix { $0 == "#" }.count
+      o += "<h\(n)>" + inline(rx(String(t.dropFirst(n)).trimmingCharacters(in: .whitespaces), #"\s+#+$"#, "")) + "</h\(n)>\n"; i += 1; continue
+    }
+    if t.range(of: #"^([-*_])([ ]*\1){2,}$"#, options: .regularExpression) != nil { flush(); closeLists(); o += "<hr>\n"; i += 1; continue }
+    if t.contains("|"), i + 1 < L.count, L[i + 1].range(of: #"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$"#, options: .regularExpression) != nil {
+      flush(); closeLists()
+      let al = cells(L[i + 1]).map { c -> String in c.hasPrefix(":") && c.hasSuffix(":") ? "center" : (c.hasSuffix(":") ? "right" : (c.hasPrefix(":") ? "left" : "")) }
+      func row(_ c: [String], _ tag: String) -> String {
+        var r = "<tr>"
+        for (k, v) in c.enumerated() {
+          let a = k < al.count ? al[k] : "", st = a.isEmpty ? "" : " style='text-align:" + a + "'"
+          r += "<" + tag + st + ">" + inline(v) + "</" + tag + ">"
+        }
+        return r + "</tr>\n"
+      }
+      o += "<table>\n" + row(cells(t), "th"); i += 2
+      while i < L.count, L[i].contains("|"), !L[i].trimmingCharacters(in: .whitespaces).isEmpty { o += row(cells(L[i]), "td"); i += 1 }
+      o += "</table>\n"; continue
+    }
+    if t.hasPrefix(">") {
+      flush(); closeLists(); var q: [String] = []
+      while i < L.count, L[i].trimmingCharacters(in: .whitespaces).hasPrefix(">") { q.append(rx(L[i].trimmingCharacters(in: .whitespaces), #"^>\s?"#, "")); i += 1 }
+      o += "<blockquote>" + mdHTML(q.joined(separator: "\n")) + "</blockquote>\n"; continue
+    }
+    let ns = l as NSString
+    if let m = listRE.firstMatch(in: l, range: NSRange(location: 0, length: ns.length)) {
+      flush()
+      let ind = ns.substring(with: m.range(at: 1)).reduce(0) { $0 + ($1 == "\t" ? 4 : 1) }
+      let tag = ns.substring(with: m.range(at: 2)).first!.isNumber ? "ol" : "ul"
+      var tx = ns.substring(with: m.range(at: 3)), box = ""
+      if tx.hasPrefix("[ ] ") { box = "<input type=checkbox disabled> "; tx.removeFirst(4) }
+      else if tx.lowercased().hasPrefix("[x] ") { box = "<input type=checkbox checked disabled> "; tx.removeFirst(4) }
+      if lists.isEmpty || ind > lists.last!.1 + 1 { o += "<" + tag + ">\n"; lists.append((tag, ind)) }
+      else { while lists.count > 1 && ind < lists.last!.1 { o += "</li></" + lists.removeLast().0 + ">\n" }; o += "</li>\n" }
+      o += "<li>" + box + inline(tx); i += 1; continue
+    }
+    if !lists.isEmpty && (l.hasPrefix(" ") || l.hasPrefix("\t")) { o += " " + inline(t); i += 1; continue }
+    closeLists(); para.append(String(l.drop { $0 == " " || $0 == "\t" })); i += 1
+  }
+  flush(); closeLists(); return o
+}
+let mdCSS = #"""
+body{font:16px/1.7 -apple-system,"PingFang SC",sans-serif;max-width:780px;margin:0 auto;padding:32px 28px 80px}
+h1,h2,h3,h4,h5,h6{margin:1.4em 0 .6em;line-height:1.3}h1,h2{border-bottom:1px solid #8884;padding-bottom:.3em}
+code{font:13px ui-monospace,Menlo,monospace;background:#8882;padding:.15em .4em;border-radius:4px}
+pre{background:#8881;border:1px solid #8883;padding:14px;border-radius:8px;overflow:auto}pre code{background:none;padding:0}
+blockquote{margin:1em 0;padding:.2em 1em;border-left:4px solid #1a8c7a;color:#8a8a8a}
+table{border-collapse:collapse}td,th{border:1px solid #8886;padding:6px 12px}th{background:#8882}
+img{max-width:100%}hr{border:0;border-top:1px solid #8884}a{color:#1a8c7a}
+"""#
+func mdPage(_ src: String, _ base: URL?) -> String {
+  let b = base.map { "<base href=\"" + esc($0.deletingLastPathComponent().absoluteString) + "\">" } ?? ""
+  return "<!doctype html><meta charset=utf-8><meta name=color-scheme content=\"light dark\">" + b + "<style>" + mdCSS + "</style>" + mdHTML(src)
+}
+
+// MARK: 编辑区:拦截文件拖放;Markdown 下拖入图片 = 在光标处插入 ![](路径)
+let imgExts: Set<String> = ["png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "heic", "heif", "ico", "svg"]
+func relPath(_ target: URL, from dir: URL) -> String {
+  let t = target.standardizedFileURL.pathComponents, d = dir.standardizedFileURL.pathComponents
+  var k = 0; while k < t.count, k < d.count, t[k] == d[k] { k += 1 }
+  return (Array(repeating: "..", count: d.count - k) + t[k...]).joined(separator: "/")
+}
+final class EditView: NSTextView {
+  weak var doc: Doc?
+  override init(frame: NSRect, textContainer: NSTextContainer?) { super.init(frame: frame, textContainer: textContainer); registerForDraggedTypes([.fileURL]) }
+  override init(frame: NSRect) { super.init(frame: frame); registerForDraggedTypes([.fileURL]) }
+  required init?(coder: NSCoder) { fatalError() }
+  override func updateDragTypeRegistration() { super.updateDragTypeRegistration(); registerForDraggedTypes([.fileURL]) }
+  func files(_ s: NSDraggingInfo) -> [URL] {
+    (s.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+  }
+  func index(_ s: NSDraggingInfo) -> Int { characterIndexForInsertion(at: convert(s.draggingLocation, from: nil)) }
+  override func draggingEntered(_ s: NSDraggingInfo) -> NSDragOperation {
+    if files(s).isEmpty { return super.draggingEntered(s) }
+    window?.makeFirstResponder(self); return .copy
+  }
+  override func draggingUpdated(_ s: NSDraggingInfo) -> NSDragOperation {
+    if files(s).isEmpty { return super.draggingUpdated(s) }
+    let i = index(s); setSelectedRange(NSRange(location: i, length: 0)); scrollRangeToVisible(NSRange(location: i, length: 0))   // 光标跟随鼠标 = 插入位置
+    return .copy
+  }
+  override func prepareForDragOperation(_ s: NSDraggingInfo) -> Bool { files(s).isEmpty ? super.prepareForDragOperation(s) : true }
+  override func performDragOperation(_ s: NSDraggingInfo) -> Bool {
+    let f = files(s); if f.isEmpty { return super.performDragOperation(s) }
+    doc?.dropFiles(f, at: index(s)); return true
+  }
+}
+func makeScroll() -> NSScrollView {
+  let sv = NSScrollView(); sv.hasVerticalScroller = true; sv.borderType = .noBorder
+  let t = EditView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+  t.minSize = NSSize(width: 0, height: 0); t.maxSize = NSSize(width: 1e7, height: 1e7)
+  t.isVerticallyResizable = true; t.isHorizontallyResizable = false; t.autoresizingMask = [.width]
+  t.textContainer?.containerSize = NSSize(width: 600, height: 1e7); t.textContainer?.widthTracksTextView = true
+  sv.documentView = t; return sv
+}
+
+// MARK: 拖放:把文件/文件夹拖进窗口即可打开
+final class DropView: NSView {
+  override init(frame: NSRect) { super.init(frame: frame); registerForDraggedTypes([.fileURL]) }
+  required init?(coder: NSCoder) { fatalError() }
+  override func draggingEntered(_ s: NSDraggingInfo) -> NSDragOperation { .copy }
+  override func performDragOperation(_ s: NSDraggingInfo) -> Bool {
+    guard let us = s.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !us.isEmpty else { return false }
+    (NSApp.delegate as? App)?.openItems(us); return true
+  }
+}
+
 // MARK: 文件夹侧边栏
 final class Node {
   let url: URL, isDir: Bool
@@ -183,6 +334,7 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
     super.init()
     let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("n")); ov.addTableColumn(c); ov.outlineTableColumn = c
     ov.headerView = nil; ov.style = .sourceList; ov.dataSource = self; ov.delegate = self; ov.target = self; ov.doubleAction = #selector(dbl)
+    ov.setDraggingSourceOperationMask(.copy, forLocal: true); ov.setDraggingSourceOperationMask(.copy, forLocal: false)
     view.documentView = ov; view.hasVerticalScroller = true
   }
   func outlineView(_ o: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int { item == nil ? top.count : (item as! Node).kids.count }
@@ -192,6 +344,7 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
     let n = item as! Node, t = NSTextField(labelWithString: n.url.lastPathComponent)
     t.lineBreakMode = .byTruncatingMiddle; t.font = .systemFont(ofSize: 12, weight: n.isDir ? .semibold : .regular); return t
   }
+  func outlineView(_ o: NSOutlineView, pasteboardWriterForItem item: Any) -> NSPasteboardWriting? { (item as! Node).url as NSURL }
   @objc func dbl() {
     guard let n = ov.item(atRow: ov.clickedRow) as? Node else { return }
     if n.isDir { ov.isItemExpanded(n) ? ov.collapseItem(n) : ov.expandItem(n) } else { (NSApp.delegate as? App)?.openURL(n.url) }
@@ -201,16 +354,18 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
 // MARK: 文档(每个标签页一个)
 var docs: [Doc] = []
 var folderRoot: URL?
+var readingMode = false   // 全局阅读模式:⌘. 一次切换所有 Markdown 标签页
 func cur() -> Doc? { docs.first { $0.win == NSApp.mainWindow } ?? docs.last }
 
-final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate {
+final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDelegate {
   let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 680), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-  let scroll = NSTextView.scrollableTextView()
+  let scroll = makeScroll()
   let status = NSTextField(labelWithString: "")
   let split = NSSplitView(), area = NSView(), side = Sidebar()
   var tv: NSTextView { scroll.documentView as! NSTextView }
   var url: URL?, enc = String.Encoding.utf8, bom = false, lang: Lang?, size: CGFloat = 13, wrap = true, eol = "LF"
   var work: DispatchWorkItem?
+  var reading = false, web: WKWebView?, tmp: URL?
 
   init(_ u: URL?) {
     super.init()
@@ -219,10 +374,11 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate {
     t.isRichText = false; t.allowsUndo = true; t.delegate = self; t.textContainerInset = NSSize(width: 4, height: 6)
     t.isAutomaticQuoteSubstitutionEnabled = false; t.isAutomaticDashSubstitutionEnabled = false
     t.isAutomaticSpellingCorrectionEnabled = false; t.isAutomaticTextReplacementEnabled = false
+    (t as? EditView)?.doc = self
     setSize(13)
     scroll.hasVerticalRuler = true; scroll.rulersVisible = true; scroll.verticalRulerView = Gutter(scroll, t)
     status.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular); status.textColor = .secondaryLabelColor
-    let root = NSView(); win.contentView = root
+    let root = DropView(); win.contentView = root
     split.isVertical = true; split.dividerStyle = .thin
     scroll.translatesAutoresizingMaskIntoConstraints = false; area.addSubview(scroll)
     split.addArrangedSubview(side.view); split.addArrangedSubview(area); side.view.isHidden = true
@@ -239,6 +395,28 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate {
     if let k = cur(), k !== self, docs.count > 1 { docs[docs.count - 2].win.addTabbedWindow(win, ordered: .above) }
     win.makeKeyAndOrderFront(nil); updateSidebar()
     if let u = u { load(u) } else { refresh() }
+  }
+  func dropFiles(_ us: [URL], at idx: Int) {
+    let md = lang?.name == "Markdown" && !reading && !scroll.isHidden
+    let imgs = md ? us.filter { imgExts.contains($0.pathExtension.lowercased()) } : []
+    let rest = us.filter { u in !imgs.contains(u) }
+    if !imgs.isEmpty { insertImages(imgs, at: idx) }
+    if !rest.isEmpty { (NSApp.delegate as? App)?.openItems(rest) }
+  }
+  func insertImages(_ imgs: [URL], at idx: Int) {
+    let dir = url?.deletingLastPathComponent()
+    let body = imgs.map { u -> String in
+      let alt = u.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "[", with: "").replacingOccurrences(of: "]", with: "")
+      var p = dir.map { relPath(u, from: $0) } ?? u.standardizedFileURL.absoluteString   // 未保存的文档用绝对路径
+      if dir != nil { p = p.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? p }
+      return "![" + alt + "](" + p.replacingOccurrences(of: "(", with: "%28").replacingOccurrences(of: ")", with: "%29") + ")"
+    }.joined(separator: "\n\n")
+    let t = tv.string as NSString; var pre = "", post = ""
+    if idx > 0 { if t.character(at: idx - 1) != 10 { pre = "\n\n" } else if idx > 1 && t.character(at: idx - 2) != 10 { pre = "\n" } }
+    if idx < t.length { if t.character(at: idx) != 10 { post = "\n\n" } else if idx + 1 < t.length && t.character(at: idx + 1) != 10 { post = "\n" } }
+    let ins = pre + body + post
+    edit(NSRange(location: idx, length: 0), ins)
+    tv.setSelectedRange(NSRange(location: idx + (pre + body).utf16.count, length: 0)); win.makeFirstResponder(tv)
   }
   func updateSidebar() {
     guard let r = folderRoot else { side.view.isHidden = true; split.adjustSubviews(); return }
@@ -278,7 +456,7 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate {
       return
     }
     if ["png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "heic", "heif", "ico", "icns"].contains(u.pathExtension.lowercased()), let img = NSImage(contentsOf: u) {
-      let v = NSImageView(image: img); v.imageScaling = .scaleProportionallyDown; v.animates = true
+      let v = NSImageView(image: img); v.isEditable = false; v.imageScaling = .scaleProportionallyDown; v.animates = true
       for o: NSLayoutConstraint.Orientation in [.horizontal, .vertical] { v.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: o); v.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: o) }
       v.translatesAutoresizingMaskIntoConstraints = false; scroll.isHidden = true; area.addSubview(v)
       NSLayoutConstraint.activate([v.topAnchor.constraint(equalTo: area.topAnchor), v.leadingAnchor.constraint(equalTo: area.leadingAnchor),
@@ -292,6 +470,7 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate {
     }
     enc = e; bom = b; eol = s.contains("\r\n") ? "CRLF" : (s.contains("\r") ? "CR" : "LF")
     tv.string = s; lang = detect(u); highlight(); win.isDocumentEdited = false; refresh()
+    if readingMode { setReading(true) }   // 新打开的 Markdown 跟随全局模式
   }
   func save(_ asNew: Bool) {
     var u = url
@@ -314,7 +493,31 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate {
     for (re, c) in l.rules { re.enumerateMatches(in: s, range: full) { m, _, _ in
       if let r = m?.range { lm.addTemporaryAttribute(.foregroundColor, value: c, forCharacterRange: r) } } }
   }
+  func setReading(_ on: Bool) {   // 阅读 / 编辑(仅 Markdown)
+    if !on {
+      guard reading else { return }
+      web?.removeFromSuperview(); web = nil; if let t = tmp { try? FileManager.default.removeItem(at: t) }; tmp = nil
+      reading = false; scroll.isHidden = false; win.makeFirstResponder(tv); refresh(); return
+    }
+    guard !reading, lang?.name == "Markdown", !scroll.isHidden else { return }
+    let cfg = WKWebViewConfiguration(); cfg.defaultWebpagePreferences.allowsContentJavaScript = false
+    let w = WKWebView(frame: .zero, configuration: cfg); w.navigationDelegate = self
+    w.translatesAutoresizingMaskIntoConstraints = false; area.addSubview(w)
+    NSLayoutConstraint.activate([w.topAnchor.constraint(equalTo: area.topAnchor), w.leadingAnchor.constraint(equalTo: area.leadingAnchor),
+      w.trailingAnchor.constraint(equalTo: area.trailingAnchor), w.bottomAnchor.constraint(equalTo: area.bottomAnchor)])
+    let t = FileManager.default.temporaryDirectory.appendingPathComponent("Notapple-\(UUID().uuidString).html")
+    try? mdPage(tv.string, url).write(to: t, atomically: true, encoding: .utf8)
+    w.loadFileURL(t, allowingReadAccessTo: URL(fileURLWithPath: "/"))
+    web = w; tmp = t; reading = true; scroll.isHidden = true; win.makeFirstResponder(w); refresh()
+  }
+  func webView(_ w: WKWebView, decidePolicyFor a: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+    guard a.navigationType == .linkActivated, let u = a.request.url else { decisionHandler(.allow); return }
+    decisionHandler(.cancel)
+    if u.isFileURL { if u.fragment == nil, FileManager.default.fileExists(atPath: u.path) { (NSApp.delegate as? App)?.openItems([u]) } }
+    else if ["http", "https", "mailto"].contains(u.scheme ?? "") { NSWorkspace.shared.open(u) }
+  }
   func refresh() {
+    if reading { status.stringValue = T("阅读模式(⌘. 返回编辑)"); return }
     let s = tv.string as NSString, p = tv.selectedRange().location
     var ln = 1, last = 0, i = 0
     for u in s.substring(to: min(p, s.length)).utf16 { i += 1; if u == 10 { ln += 1; last = i } }
@@ -342,7 +545,7 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate {
     case .alertSecondButtonReturn: return true
     default: return false }
   }
-  func windowWillClose(_ n: Notification) { docs.removeAll { $0 === self } }
+  func windowWillClose(_ n: Notification) { docs.removeAll { $0 === self }; if let t = tmp { try? FileManager.default.removeItem(at: t) } }
 }
 
 // MARK: 查找/替换(支持正则)
@@ -426,7 +629,12 @@ final class App: NSObject, NSApplicationDelegate {
     if let d = docs.first(where: { $0.url == u }) { d.win.makeKeyAndOrderFront(nil); return }
     if let c = cur(), c.url == nil, !c.win.isDocumentEdited, c.tv.string.isEmpty { c.load(u) } else { _ = Doc(u) }
   }
-  func application(_ a: NSApplication, openFiles f: [String]) { f.forEach { openURL(URL(fileURLWithPath: $0)) }; a.reply(toOpenOrPrint: .success) }
+  func openItems(_ us: [URL]) {
+    for u in us {
+      if (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { folderRoot = u; docs.forEach { $0.updateSidebar() } } else { openURL(u) }
+    }
+  }
+  func application(_ a: NSApplication, openFiles f: [String]) { openItems(f.map { URL(fileURLWithPath: $0) }); a.reply(toOpenOrPrint: .success) }
   func applicationShouldTerminateAfterLastWindowClosed(_ a: NSApplication) -> Bool { true }
   func applicationShouldTerminate(_ a: NSApplication) -> NSApplication.TerminateReply {
     guard docs.contains(where: { $0.win.isDocumentEdited }) else { return .terminateNow }
@@ -444,7 +652,7 @@ final class App: NSObject, NSApplicationDelegate {
   }
   func buildMenu() {
     NSApp.mainMenu = NSMenu()
-    let a = sub("notapple"); add(a, T("退出 notapple"), #selector(NSApplication.terminate(_:)), "q")
+    let a = sub("Notapple"); add(a, T("退出 Notapple"), #selector(NSApplication.terminate(_:)), "q")
     let f = sub(T("文件"))
     add(f, T("新建标签页"), #selector(newDoc), "n"); add(f, T("打开…"), #selector(openDlg), "o"); add(f, T("打开文件夹…"), #selector(openFolder), "o", [.command, .shift]); add(f, T("关闭文件夹"), #selector(closeFolder)); add(f, T("保存"), #selector(save), "s")
     add(f, T("另存为…"), #selector(saveAs), "s", [.command, .shift]); add(f, T("关闭标签页"), #selector(NSWindow.performClose(_:)), "w")
@@ -464,7 +672,7 @@ final class App: NSObject, NSApplicationDelegate {
     let el = NSMenu(title: T("换行符")); let eli = e.addItem(withTitle: T("换行符转换"), action: nil, keyEquivalent: ""); eli.submenu = el
     for (i, t) in ["LF (Unix)", "CRLF (Windows)", T("CR (旧 Mac)")].enumerated() { add(el, t, #selector(setEOL(_:)), "", [], tag: i) }
     let v = sub(T("视图"))
-    add(v, T("自动换行"), #selector(toggleWrap), "w", [.option]); add(v, T("放大"), #selector(bigger), "+"); add(v, T("缩小"), #selector(smaller), "-")
+    add(v, T("自动换行"), #selector(toggleWrap), "w", [.option]); add(v, T("放大"), #selector(bigger), "+"); add(v, T("缩小"), #selector(smaller), "-"); add(v, T("切换阅读/编辑模式"), #selector(toggleRead), ".")
     let en = sub(T("编码")); for (i, x) in encs.enumerated() { add(en, String(format: T("以 %@ 保存"), x.0), #selector(setEnc(_:)), "", [], tag: i) }
     let lg = sub(T("语法高亮")); add(lg, T("纯文本"), #selector(setLang(_:)), "", [], tag: -1)
     for (i, l) in langs.enumerated() { add(lg, l.name, #selector(setLang(_:)), "", [], tag: i) }
@@ -541,6 +749,13 @@ final class App: NSObject, NSApplicationDelegate {
   @objc func setEnc(_ i: NSMenuItem) { guard let d = cur() else { return }; d.enc = encs[i.tag].1; d.bom = encs[i.tag].2; d.win.isDocumentEdited = true; d.refresh() }
   @objc func setLang(_ i: NSMenuItem) { guard let d = cur() else { return }; d.lang = i.tag < 0 ? nil : langs[i.tag]; d.highlight(); d.refresh() }
   @objc func toggleWrap() { guard let d = cur() else { return }; d.setWrap(!d.wrap) }
+  @objc func toggleRead() {
+    guard let c = cur() else { return }
+    let md = docs.filter { $0.lang?.name == "Markdown" && ($0.reading || !$0.scroll.isHidden) }
+    guard !md.isEmpty else { NSSound.beep(); return }
+    readingMode = !(c.lang?.name == "Markdown" ? c.reading : readingMode)
+    md.forEach { $0.setReading(readingMode) }
+  }
   @objc func bigger() { if let d = cur() { d.setSize(d.size + 1) } }
   @objc func smaller() { if let d = cur() { d.setSize(d.size - 1) } }
 }

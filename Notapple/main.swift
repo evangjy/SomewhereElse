@@ -120,6 +120,9 @@ let langs: [Lang] = [
   Lang("Verilog/SV", "v sv svh vh", "module endmodule input output inout wire reg logic always assign begin end if else case endcase for while initial posedge negedge parameter localparam function endfunction task endtask generate endgenerate integer"),
   Lang("VHDL", "vhd vhdl", "library use entity architecture is of begin end port map signal variable process if then else elsif case when for loop in out inout std_logic std_logic_vector generic component", lc: "--", bc: nil, ci: true),
   Lang("Assembly", "s asm", "mov add sub mul div push pop call ret jmp je jne cmp lea nop int ldr str bl b mrs msr", lc: ";", bc: nil, ci: true),
+  Lang("LaTeX", "tex sty cls bib ltx", "", lc: "%", bc: nil, str: false,
+       x: [(#"\\[A-Za-z@]+\*?|\\[^A-Za-z\s]"#, .systemPink), (#"\\(?:begin|end)\{[^}]*\}"#, .systemPurple),
+           (#"\$\$[\s\S]*?\$\$|\$[^$\n]+\$"#, .systemOrange), (#"^@\w+(?=\{)"#, .systemPurple)]),
   Lang("Tcl/XDC", "tcl xdc sdc", "set proc if else foreach while return puts source create_clock set_property", lc: "#", bc: nil),
 ]
 func detect(_ u: URL) -> Lang? { let e = u.pathExtension.lowercased(); return langs.first { $0.exts.contains(e) } }
@@ -175,14 +178,150 @@ func esc(_ s: String) -> String {
    .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
 }
 func rx(_ s: String, _ p: String, _ t: String) -> String { s.replacingOccurrences(of: p, with: t, options: .regularExpression) }
-func inline(_ t: String) -> String {
-  let s = esc(t) as NSString, re = try! NSRegularExpression(pattern: "`([^`]+)`")
-  var out = "", last = 0, stash: [String] = []
-  for m in re.matches(in: s as String, range: NSRange(location: 0, length: s.length)) {
-    out += s.substring(with: NSRange(location: last, length: m.range.location - last))
-    stash.append("<code>" + s.substring(with: m.range(at: 1)) + "</code>"); out += "\u{1}\(stash.count - 1)\u{1}"; last = NSMaxRange(m.range)
+// MARK: LaTeX 公式 → MathML(WebKit 原生渲染:无需 JS、无需外部库、可离线)
+let texGreek: [String: String] = ["alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ϵ", "varepsilon": "ε", "zeta": "ζ", "eta": "η", "theta": "θ", "vartheta": "ϑ", "iota": "ι", "kappa": "κ", "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ", "pi": "π", "varpi": "ϖ", "rho": "ρ", "varrho": "ϱ", "sigma": "σ", "varsigma": "ς", "tau": "τ", "upsilon": "υ", "phi": "ϕ", "varphi": "φ", "chi": "χ", "psi": "ψ", "omega": "ω", "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ", "Pi": "Π", "Sigma": "Σ", "Upsilon": "Υ", "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω"]
+let texOp: [String: String] = ["times": "×", "cdot": "⋅", "pm": "±", "mp": "∓", "div": "÷", "ast": "∗", "star": "⋆", "circ": "∘", "bullet": "∙", "leq": "≤", "le": "≤", "geq": "≥", "ge": "≥", "neq": "≠", "ne": "≠", "approx": "≈", "sim": "∼", "simeq": "≃", "cong": "≅", "equiv": "≡", "propto": "∝", "ll": "≪", "gg": "≫", "infty": "∞", "partial": "∂", "nabla": "∇", "to": "→", "rightarrow": "→", "leftarrow": "←", "gets": "←", "leftrightarrow": "↔", "Rightarrow": "⇒", "Leftarrow": "⇐", "Leftrightarrow": "⇔", "iff": "⟺", "implies": "⟹", "mapsto": "↦", "uparrow": "↑", "downarrow": "↓", "in": "∈", "notin": "∉", "ni": "∋", "subset": "⊂", "supset": "⊃", "subseteq": "⊆", "supseteq": "⊇", "cup": "∪", "cap": "∩", "setminus": "∖", "emptyset": "∅", "varnothing": "∅", "forall": "∀", "exists": "∃", "neg": "¬", "lnot": "¬", "land": "∧", "wedge": "∧", "lor": "∨", "vee": "∨", "oplus": "⊕", "otimes": "⊗", "odot": "⊙", "perp": "⊥", "parallel": "∥", "mid": "∣", "angle": "∠", "ldots": "…", "dots": "…", "cdots": "⋯", "vdots": "⋮", "ddots": "⋱", "hbar": "ℏ", "ell": "ℓ", "Re": "ℜ", "Im": "ℑ", "aleph": "ℵ", "prime": "′", "degree": "°", "sum": "∑", "prod": "∏", "coprod": "∐", "int": "∫", "iint": "∬", "iiint": "∭", "oint": "∮", "bigcup": "⋃", "bigcap": "⋂", "bigoplus": "⨁", "bigotimes": "⨂", "langle": "⟨", "rangle": "⟩", "lfloor": "⌊", "rfloor": "⌋", "lceil": "⌈", "rceil": "⌉", "lbrace": "{", "rbrace": "}", "vert": "|", "Vert": "‖", "triangle": "△", "square": "□", "therefore": "∴", "because": "∵", "dagger": "†", "sqcup": "⊔"]
+let texFn: Set<String> = ["sin", "cos", "tan", "cot", "sec", "csc", "log", "ln", "exp", "lim", "max", "min", "sup", "inf", "det", "gcd", "arg", "dim", "ker", "deg", "limsup", "liminf", "sinh", "cosh", "tanh", "arcsin", "arccos", "arctan", "Pr"]
+let limOps: Set<String> = ["sum", "prod", "coprod", "bigcup", "bigcap", "bigoplus", "bigotimes", "lim", "max", "min", "sup", "inf", "limsup", "liminf"]
+let texAccent: [String: String] = ["hat": "^", "widehat": "^", "bar": "¯", "overline": "¯", "vec": "→", "tilde": "~", "widetilde": "~", "dot": "˙", "ddot": "¨"]
+let texSkip: Set<String> = ["displaystyle", "textstyle", "scriptstyle", "limits", "nolimits", "big", "Big", "bigg", "Bigg", "bigl", "bigr", "Bigl", "Bigr", "biggl", "biggr", "nonumber", "notag"]
+let bbMap: [Character: String] = ["R": "ℝ", "N": "ℕ", "Z": "ℤ", "Q": "ℚ", "C": "ℂ", "H": "ℍ", "P": "ℙ"]
+func mo(_ s: String) -> String { s.isEmpty ? "" : "<mo fence=\"true\" stretchy=\"true\">" + esc(s) + "</mo>" }
+final class TeX {
+  let c: [Character]; var i = 0
+  init(_ s: String) { c = Array(s) }
+  var cur: Character? { i < c.count ? c[i] : nil }
+  func ws() { while let ch = cur, ch.isWhitespace { i += 1 } }
+  func peek(_ s: String) -> Bool { let a = Array(s); return i + a.count <= c.count && Array(c[i..<(i + a.count)]) == a }
+  func peekCmd(_ n: String) -> Bool { let e = i + n.count + 1; return peek("\\" + n) && !(e < c.count && c[e].isASCII && c[e].isLetter) }
+  func name() -> String {
+    guard let ch = cur else { return "" }
+    if ch.isASCII && ch.isLetter { var n = ""; while let x = cur, x.isASCII && x.isLetter { n.append(x); i += 1 }; return n }
+    i += 1; return String(ch)
   }
-  out += s.substring(from: last)
+  func raw() -> String {
+    ws(); var t = ""; guard cur == "{" else { return t }; i += 1; var d = 1
+    while let x = cur { i += 1; if x == "{" { d += 1 } else if x == "}" { d -= 1; if d == 0 { break } }; t.append(x) }
+    return t
+  }
+  func atEnd() -> Bool { ws(); guard let ch = cur else { return true }; return ch == "}" || ch == "&" || peek("\\\\") || peekCmd("right") || peekCmd("end") }
+  func row() -> String { var o = ""; while !atEnd() { o += atom() }; return o }
+  func arg() -> String {
+    ws(); if cur == nil || cur == "}" || cur == "&" { return "<mrow></mrow>" }
+    if cur == "{" { i += 1; let r = row(); if cur == "}" { i += 1 }; return "<mrow>" + r + "</mrow>" }
+    return primary().0
+  }
+  func atom() -> String {
+    let (b, lim) = primary(); var sub = "", sup = ""
+    while true {
+      ws()
+      if cur == "^" { i += 1; sup += arg() } else if cur == "_" { i += 1; sub += arg() } else if cur == "'" { i += 1; sup += "<mo>′</mo>" } else { break }
+    }
+    if sub.isEmpty && sup.isEmpty { return b }
+    if lim { return sup.isEmpty ? "<munder>\(b)<mrow>\(sub)</mrow></munder>" : (sub.isEmpty ? "<mover>\(b)<mrow>\(sup)</mrow></mover>" : "<munderover>\(b)<mrow>\(sub)</mrow><mrow>\(sup)</mrow></munderover>") }
+    return sup.isEmpty ? "<msub>\(b)<mrow>\(sub)</mrow></msub>" : (sub.isEmpty ? "<msup>\(b)<mrow>\(sup)</mrow></msup>" : "<msubsup>\(b)<mrow>\(sub)</mrow><mrow>\(sup)</mrow></msubsup>")
+  }
+  func primary() -> (String, Bool) {
+    ws(); guard let ch = cur else { return ("", false) }
+    if ch == "{" { i += 1; let r = row(); if cur == "}" { i += 1 }; return ("<mrow>" + r + "</mrow>", false) }
+    if ch.isASCII && ch.isNumber {
+      var n = ""; while let x = cur, (x.isASCII && x.isNumber) || (x == "." && i + 1 < c.count && c[i + 1].isNumber) { n.append(x); i += 1 }
+      return ("<mn>" + n + "</mn>", false)
+    }
+    if ch.isLetter { i += 1; return ("<mi>" + String(ch) + "</mi>", false) }
+    i += 1
+    if ch == "\\" { return command() }
+    switch ch {
+    case "-": return ("<mo>−</mo>", false)
+    case "<": return ("<mo>&lt;</mo>", false)
+    case ">": return ("<mo>&gt;</mo>", false)
+    case "&": return ("<mo>&amp;</mo>", false)
+    case "~": return ("<mspace width=\"0.3em\"/>", false)
+    default: return ("<mo>" + String(ch) + "</mo>", false)
+    }
+  }
+  func delim() -> String {
+    ws(); guard let ch = cur else { return "" }; i += 1
+    if ch == "." { return "" }
+    if ch == "\\" { let n = name(); if n == "|" { return "‖" }; if n == "{" || n == "}" { return n }; return texOp[n] ?? "" }
+    return String(ch)
+  }
+  func command() -> (String, Bool) {
+    let n = name()
+    switch n {
+    case "frac", "dfrac", "tfrac": let a = arg(), b = arg(); return ("<mfrac>" + a + b + "</mfrac>", false)
+    case "binom": let a = arg(), b = arg(); return ("<mrow><mo>(</mo><mfrac linethickness=\"0\">" + a + b + "</mfrac><mo>)</mo></mrow>", false)
+    case "sqrt":
+      ws()
+      if cur == "[" { i += 1; var d = ""; while let x = cur, x != "]" { d.append(x); i += 1 }; i += 1; let a = arg(); return ("<mroot>" + a + "<mrow>" + TeX(d).row() + "</mrow></mroot>", false) }
+      return ("<msqrt>" + arg() + "</msqrt>", false)
+    case "text", "textrm", "mbox": return ("<mtext>" + esc(raw()) + "</mtext>", false)
+    case "mathrm", "operatorname": return ("<mi mathvariant=\"normal\">" + esc(raw()) + "</mi>", false)
+    case "mathbf", "textbf", "boldsymbol", "bm": return ("<mrow style=\"font-weight:bold\">" + arg() + "</mrow>", false)
+    case "mathit": return ("<mi>" + esc(raw()) + "</mi>", false)
+    case "mathbb": return ("<mi>" + raw().map { bbMap[$0] ?? String($0) }.joined() + "</mi>", false)
+    case "mathcal", "mathscr", "mathfrak": return ("<mrow>" + arg() + "</mrow>", false)
+    case "left":
+      let o = delim(), r = row(); var cl = ""; if peekCmd("right") { i += 6; cl = delim() }
+      return ("<mrow>" + mo(o) + r + mo(cl) + "</mrow>", false)
+    case "right": _ = delim(); return ("", false)
+    case "underline": return ("<munder>" + arg() + "<mo>_</mo></munder>", false)
+    case "begin":
+      guard cur == "{" else { return ("", false) }
+      i += 1; var e = ""; while let x = cur, x != "}" { e.append(x); i += 1 }; i += 1
+      if e == "array" { _ = raw() }
+      var rows: [[String]] = [[]], cell = ""
+      while true {
+        cell += row(); ws()
+        if cur == "&" { i += 1; rows[rows.count - 1].append(cell); cell = "" }
+        else if peek("\\\\") { i += 2; rows[rows.count - 1].append(cell); cell = ""; rows.append([]) }
+        else { break }
+      }
+      rows[rows.count - 1].append(cell)
+      if rows.count > 1, rows[rows.count - 1] == [""] { rows.removeLast() }
+      if peekCmd("end") { i += 4; _ = raw() }
+      var tbl = "<mtable" + (["align", "aligned", "split", "align*"].contains(e) ? " columnalign=\"right left\"" : (e == "cases" ? " columnalign=\"left left\"" : "")) + ">"
+      for r in rows { tbl += "<mtr>" + r.map { "<mtd>" + $0 + "</mtd>" }.joined() + "</mtr>" }
+      tbl += "</mtable>"
+      let (l, r): (String, String) = ["pmatrix": ("(", ")"), "bmatrix": ("[", "]"), "Bmatrix": ("{", "}"), "vmatrix": ("|", "|"), "Vmatrix": ("‖", "‖"), "cases": ("{", "")][e] ?? ("", "")
+      return ("<mrow>" + mo(l) + tbl + mo(r) + "</mrow>", false)
+    case ",": return ("<mspace width=\"0.17em\"/>", false)
+    case ":", ";", " ": return ("<mspace width=\"0.25em\"/>", false)
+    case "quad": return ("<mspace width=\"1em\"/>", false)
+    case "qquad": return ("<mspace width=\"2em\"/>", false)
+    case "!", "": return ("", false)
+    case "{", "}", "%", "$", "#", "_": return ("<mo>" + n + "</mo>", false)
+    case "&": return ("<mo>&amp;</mo>", false)
+    case "|": return ("<mo>‖</mo>", false)
+    default:
+      if texSkip.contains(n) { return ("", false) }
+      if let a = texAccent[n] { return ("<mover accent=\"true\">" + arg() + "<mo>" + a + "</mo></mover>", false) }
+      if let g = texGreek[n] { return ("<mi>" + g + "</mi>", false) }
+      if let o = texOp[n] { return ("<mo>" + o + "</mo>", limOps.contains(n)) }
+      if texFn.contains(n) { return ("<mi>" + n + "</mi>", limOps.contains(n)) }
+      return ("<mtext>\\" + esc(n) + "</mtext>", false)   // 未支持的命令:原样显示
+    }
+  }
+}
+func texToMathML(_ tex: String, block: Bool) -> String {
+  let t = TeX(tex.trimmingCharacters(in: .whitespacesAndNewlines)); var out = ""
+  while t.i < t.c.count { out += t.row(); if t.i < t.c.count { t.i += t.peek("\\\\") ? 2 : 1 } }
+  return "<math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"" + (block ? "block" : "inline") + "\">" + out + "</math>"
+}
+func stashAll(_ s: String, _ pat: String, _ stash: inout [String], _ f: (NSTextCheckingResult, NSString) -> String) -> String {
+  let ns = s as NSString, re = try! NSRegularExpression(pattern: pat)
+  var out = "", last = 0
+  for m in re.matches(in: s, range: NSRange(location: 0, length: ns.length)) {
+    out += ns.substring(with: NSRange(location: last, length: m.range.location - last))
+    stash.append(f(m, ns)); out += "\u{1}\(stash.count - 1)\u{1}"; last = NSMaxRange(m.range)
+  }
+  return out + ns.substring(from: last)
+}
+func inline(_ t: String) -> String {
+  var stash: [String] = []
+  var out = stashAll(t, "`([^`]+)`", &stash) { m, ns in "<code>" + esc(ns.substring(with: m.range(at: 1))) + "</code>" }
+  out = stashAll(out, #"(?<!\\)\$(?=[^\s$])([^$\n]*?[^\s$\\])\$(?!\d)"#, &stash) { m, ns in texToMathML(ns.substring(with: m.range(at: 1)), block: false) }
+  out = esc(out)
   out = rx(out, #"!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;.*?&quot;)?\)"#, #"<img alt="$1" src="$2">"#)
   out = rx(out, #"\[([^\]]+)\]\(([^)\s]+)(?:\s+&quot;.*?&quot;)?\)"#, #"<a href="$2">$1</a>"#)
   out = rx(out, #"\*\*(.+?)\*\*|__(.+?)__"#, "<strong>$1$2</strong>")
@@ -209,6 +348,12 @@ func mdHTML(_ src: String) -> String {
       o += "<pre><code>" + esc(code.joined(separator: "\n")) + "</code></pre>\n"; i += 1; continue
     }
     if t.isEmpty { flush(); i += 1; continue }
+    if t.hasPrefix("$$") {
+      flush(); closeLists(); var body = String(t.dropFirst(2)); i += 1
+      if let r = body.range(of: "$$") { body = String(body[..<r.lowerBound]) }
+      else { while i < L.count { let u = L[i]; i += 1; if let r = u.range(of: "$$") { body += "\n" + String(u[..<r.lowerBound]); break }; body += "\n" + u } }
+      o += "<div class=math>" + texToMathML(body, block: true) + "</div>\n"; continue
+    }
     if t.range(of: #"^#{1,6}\s"#, options: .regularExpression) != nil {
       flush(); closeLists(); let n = t.prefix { $0 == "#" }.count
       o += "<h\(n)>" + inline(rx(String(t.dropFirst(n)).trimmingCharacters(in: .whitespaces), #"\s+#+$"#, "")) + "</h\(n)>\n"; i += 1; continue
@@ -258,7 +403,7 @@ code{font:13px ui-monospace,Menlo,monospace;background:#8882;padding:.15em .4em;
 pre{background:#8881;border:1px solid #8883;padding:14px;border-radius:8px;overflow:auto}pre code{background:none;padding:0}
 blockquote{margin:1em 0;padding:.2em 1em;border-left:4px solid #1a8c7a;color:#8a8a8a}
 table{border-collapse:collapse}td,th{border:1px solid #8886;padding:6px 12px}th{background:#8882}
-img{max-width:100%}hr{border:0;border-top:1px solid #8884}a{color:#1a8c7a}
+math{font-size:1.15em}.math{overflow-x:auto;text-align:center;margin:.8em 0}img{max-width:100%}hr{border:0;border-top:1px solid #8884}a{color:#1a8c7a}
 """#
 func mdPage(_ src: String, _ base: URL?) -> String {
   let b = base.map { "<base href=\"" + esc($0.deletingLastPathComponent().absoluteString) + "\">" } ?? ""

@@ -1,10 +1,41 @@
 import Cocoa
 import PDFKit
 import WebKit
+import Security
 
 var isEN: Bool = UserDefaults.standard.string(forKey: "ui").map { $0 == "en" } ?? !(Locale.preferredLanguages.first ?? "").hasPrefix("zh")
 let enStr: [String: String] = [
   "未命名": "Untitled",
+  "语言已切换": "Language Changed",
+  "“窗口”等系统菜单需要重启后才会切换语言。": "System menus such as Window switch language after restarting.",
+  "立即重启": "Restart Now",
+  "稍后": "Later",
+  "确定": "OK",
+  "应用": "Apply",
+  "部分系统菜单项(如“窗口”)的语言需重启后切换。": "Some system menu items (such as Window) switch language after restarting.",
+  "设置…": "Settings…",
+  "设置": "Settings",
+  "接口类型": "Provider",
+  "OpenAI 兼容": "OpenAI-compatible",
+  "接口地址": "Base URL",
+  "模型名称": "Model",
+  "API 密钥": "API Key",
+  "API 密钥保存在系统钥匙串中,仅用于调用你配置的接口。": "The API key is stored in the macOS Keychain and only used to call the endpoint you configure.",
+  "AI 协作": "AI Co-work",
+  "发送": "Send",
+  "发送中…": "Sending…",
+  "新对话": "New Chat",
+  "插入光标处": "Insert at Cursor",
+  "附带当前文档": "Include Current Document",
+  "清除": "Clear",
+  "附件(%ld):%@": "Attachments (%ld): %@",
+  "拖入文字、图片或文件到这里": "Drop text, images or files here",
+  "无法读取该文件:%@": "Can't read file: %@",
+  "我": "You",
+  "请先在“设置”中填写 API 密钥": "Set your API key in Settings first.",
+  "请求失败:%@": "Request failed: %@",
+  "(空回复)": "(empty reply)",
+  "你是嵌入在文本编辑器 Notapple 中的 AI 协作助手,回答简洁、可直接用于文档。": "You are an AI co-work assistant inside the text editor Notapple. Be concise; answers should be usable directly in documents.",
   "CR (旧 Mac)": "CR (classic Mac)",
   "图片  |  %ld × %ld 像素  |  %@": "Image  |  %ld × %ld px  |  %@",
   "切换阅读/编辑模式": "Toggle Reading / Editing Mode",
@@ -14,7 +45,9 @@ let enStr: [String: String] = [
   "文件看起来是二进制。": "This file looks like binary data.",
   "文本": "Text",
   "纯文本": "Plain Text",
-  "行 %ld, 列 %ld  |  %ld 字符  |  %@  |  %@  |  %@": "Ln %ld, Col %ld  |  %ld chars  |  %@  |  %@  |  %@",
+  "行 %ld, 列 %ld  |  %ld 字符  |  %@  |  %@": "Ln %ld, Col %ld  |  %ld chars  |  %@  |  %@",
+  "无法用 %@ 表示当前文本中的部分字符": "Some characters can't be represented in %@",
+  "当前编码无法表示文本中的部分字符,未写入文件": "The current encoding can't represent some characters. Nothing was written.",
   "保存对“%@”的更改?": "Save changes to “%@”?",
   "保存": "Save",
   "不保存": "Don't Save",
@@ -101,7 +134,7 @@ let langs: [Lang] = [
   Lang("C/C++/ObjC", "c h cpp cc cxx hpp hh m mm ino", cKW, x: [(#"^\s*#\s*\w+.*$"#, .systemPurple)]),
   Lang("Java/Kotlin/C#", "java kt kts cs scala", cKW + " fun val var package import interface extends implements final abstract override string object internal"),
   Lang("JavaScript/TS", "js jsx mjs ts tsx", "function var let const if else for while do switch case default break continue return class extends new this try catch throw import export from async await typeof null undefined true false interface type enum"),
-  Lang("Python", "py pyw", "def class if elif else for while return import from as with try except finally raise lambda yield pass break continue in is not and or None True False global async await", lc: "#", bc: #"""[\s\S]*?"""|'''[\s\S]*?'''"#),
+  Lang("Python", "py pyw", "def class if elif else for while return import from as with try except finally raise lambda yield pass break continue in is not and or None True False global async await", lc: "#", bc: #"(?:"""[\s\S]*?"""|'''[\s\S]*?''')"#),
   Lang("Go", "go", "func var const type struct interface map chan package import if else for range switch case default return break continue go defer select nil true false"),
   Lang("Rust", "rs", "fn let mut const static struct enum impl trait pub use mod crate self super if else match for while loop return break continue as ref move async await true false where type"),
   Lang("Shell", "sh bash zsh fish", "if then else elif fi for while do done case esac function in return export local echo exit", lc: "#", bc: nil),
@@ -126,6 +159,44 @@ let langs: [Lang] = [
   Lang("Tcl/XDC", "tcl xdc sdc", "set proc if else foreach while return puts source create_clock set_property", lc: "#", bc: nil),
 ]
 func detect(_ u: URL) -> Lang? { let e = u.pathExtension.lowercased(); return langs.first { $0.exts.contains(e) } }
+func sniff(_ s: String) -> Lang? {   // 无扩展名/未保存文档:根据内容自动识别语法
+  let h = String(s.prefix(6000)), t = h.trimmingCharacters(in: .whitespacesAndNewlines)
+  if t.isEmpty { return nil }
+  func L(_ n: String) -> Lang? { langs.first { $0.name == n } }
+  func has(_ src: String, _ p: String) -> Bool { src.range(of: p, options: .regularExpression) != nil }
+  if t.hasPrefix("#!") {
+    let l = t.prefix { $0 != "\n" }.lowercased()
+    for (k, n) in [("python", "Python"), ("ruby", "Ruby"), ("node", "JavaScript/TS"), ("php", "PHP"), ("lua", "Lua"), ("sh", "Shell")] where l.contains(k) { return L(n) }
+  }
+  if t.hasPrefix("<?php") { return L("PHP") }
+  if t.hasPrefix("<?xml") || has(h, #"(?i)<!doctype html|<html[\s>]|<(div|body|head|svg|script)[\s>]"#) { return L("HTML/XML") }
+  if t.hasPrefix("{") || t.hasPrefix("["), s.utf8.count < 500_000, (try? JSONSerialization.jsonObject(with: Data(s.utf8))) != nil { return L("JSON") }
+  if has(h, #"\\documentclass|\\usepackage|\\begin\{(document|equation|align|itemize|figure|tabular)"#) { return L("LaTeX") }
+  let heads = h.components(separatedBy: "\n").filter { has($0, #"^#{1,6} \S"#) }.count
+  let other = [#"\]\("#, #"\*\*\S"#, #"(?m)^>\s"#, #"(?m)^\|.+\|\s*$"#, #"!\["#, #"(?m)^\s*[-*] \[[ x]\]"#].filter { has(h, $0) }.count
+  if has(h, "```") && heads + other > 0 { return L("Markdown") }
+  let code = h.replacingOccurrences(of: #"```[\s\S]*?(```|$)"#, with: "", options: .regularExpression)
+  let rules: [(String, String)] = [
+    ("Verilog/SV", #"(?m)^\s*module\s+\w+[\s\S]*?\b(wire|reg|logic|assign|always)\b"#),
+    ("VHDL", #"(?i)\b(entity\s+\w+\s+is|architecture\s+\w+\s+of|std_logic)\b"#),
+    ("SQL", #"(?im)^\s*(select\s[\s\S]+?\sfrom\s|insert\s+into\s|create\s+table\s|alter\s+table\s|delete\s+from\s)"#),
+    ("Go", #"(?m)^package\s+\w+\s*$[\s\S]*?\b(func|import)\b"#),
+    ("Rust", #"\bfn\s+\w+\s*[(<]|\blet\s+mut\b|\buse\s+std::"#),
+    ("Swift", #"(?m)^\s*(import\s+(Foundation|SwiftUI|UIKit|Cocoa|AppKit)\b|(public\s+|private\s+|final\s+)*(struct|class|enum|protocol|extension)\s+\w+|func\s+\w+\s*\(.*\)\s*(->|\{))"#),
+    ("Python", #"(?m)^\s*(def\s+\w+\s*\(.*\)\s*(->.*)?:|class\s+\w+(\(.*\))?\s*:|from\s+[\w.]+\s+import\s|import\s+\w+(\s+as\s+\w+)?\s*$|if\s+__name__)"#),
+    ("Java/Kotlin/C#", #"\b(public|private|protected)\s+(static\s+)?(final\s+)?(class|void|int|String|string)\b|using\s+System;|System\.out\.print|(?m)^\s*package\s+[\w.]+;"#),
+    ("C/C++/ObjC", #"(?m)^\s*#\s*include\s*[<"]|\bint\s+main\s*\(|std::"#),
+    ("JavaScript/TS", #"\b(const|let|var)\s+\w+\s*=|\bfunction\s*\w*\s*\(|=>\s*[{(\w]|console\.log|\brequire\(|(?m)^\s*import\s.+\sfrom\s|export\s+(default|const|function)"#),
+    ("CSS", #"(?m)^[.#@\w][^{}\n]*\{\s*\n?\s*[\w-]+\s*:\s*[^;{}]+;"#),
+  ]
+  for (n, p) in rules where has(code, p) { return L(n) }
+  if (heads >= 1 && has(h, #"(?m)^#{1,6} \S.*\n\s*\n"#)) || (heads >= 1 && other >= 1) || other >= 2 { return L("Markdown") }
+  let lines = h.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+  let kv = lines.filter { has($0, #"^\s*[\w.-]+:(\s+\S.*)?$|^\s*- \S"#) }.count
+  if lines.count >= 3 && kv * 10 >= lines.count * 7 && has(h, #"(?m)^[\w.-]+:"#) { return L("YAML/INI/TOML") }
+  return nil
+}
+
 
 // MARK: 编码
 func cf(_ e: CFStringEncodings) -> String.Encoding { .init(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(e.rawValue))) }
@@ -442,13 +513,302 @@ final class EditView: NSTextView {
     doc?.dropFiles(f, at: index(s)); return true
   }
 }
-func makeScroll() -> NSScrollView {
+func makeScroll(_ t: NSTextView = EditView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))) -> NSScrollView {
   let sv = NSScrollView(); sv.hasVerticalScroller = true; sv.borderType = .noBorder
-  let t = EditView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
   t.minSize = NSSize(width: 0, height: 0); t.maxSize = NSSize(width: 1e7, height: 1e7)
   t.isVerticallyResizable = true; t.isHorizontallyResizable = false; t.autoresizingMask = [.width]
   t.textContainer?.containerSize = NSSize(width: 600, height: 1e7); t.textContainer?.widthTracksTextView = true
   sv.documentView = t; return sv
+}
+
+// MARK: AI 协作(右侧栏聊天):模型接口 / 附件 / 拖放
+struct Attach { var name: String; var text: String?; var img: Data?; var mime: String }
+struct Msg { var role: String; var text: String; var files: [Attach] }
+enum Keychain {   // API 密钥存系统钥匙串
+  static let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "notapple.ai", kSecAttrAccount as String: "apikey"]
+  static func get() -> String? {
+    var r = q; r[kSecReturnData as String] = true; var out: AnyObject?
+    guard SecItemCopyMatching(r as CFDictionary, &out) == errSecSuccess, let d = out as? Data else { return nil }
+    return String(data: d, encoding: .utf8)
+  }
+  static func set(_ v: String) {
+    SecItemDelete(q as CFDictionary); guard !v.isEmpty else { return }
+    var a = q; a[kSecValueData as String] = Data(v.utf8); SecItemAdd(a as CFDictionary, nil)
+  }
+}
+enum AI {
+  static let defs: [(String, String)] = [("https://api.anthropic.com", "claude-sonnet-5-5"), ("https://api.openai.com", "gpt-4o")]
+  static func endpoint(_ base: String, _ path: String) -> String {
+    let b = base.trimmingCharacters(in: CharacterSet(charactersIn: "/ \n")); return b.hasSuffix("/v1") ? b + path : b + "/v1" + path
+  }
+  static func ask(_ msgs: [Msg], system: String, done: @escaping (Bool, String) -> Void) {
+    let d = UserDefaults.standard, prov = d.integer(forKey: "ai.provider")
+    let base = d.string(forKey: "ai.base").flatMap { $0.isEmpty ? nil : $0 } ?? defs[prov].0
+    let model = d.string(forKey: "ai.model").flatMap { $0.isEmpty ? nil : $0 } ?? defs[prov].1
+    guard let key = Keychain.get(), !key.isEmpty else { done(false, T("请先在“设置”中填写 API 密钥")); return }
+    guard let url = URL(string: endpoint(base, prov == 0 ? "/messages" : "/chat/completions")) else { done(false, String(format: T("请求失败:%@"), base)); return }
+    func blocks(_ m: Msg) -> Any {
+      if m.role != "user" { return m.text }
+      var b: [[String: Any]] = []
+      for f in m.files {
+        if let im = f.img {
+          let b64 = im.base64EncodedString()
+          let blk: [String: Any] = prov == 0 ? ["type": "image", "source": ["type": "base64", "media_type": f.mime, "data": b64]] : ["type": "image_url", "image_url": ["url": "data:" + f.mime + ";base64," + b64]]
+          b.append(blk)
+        } else if let t = f.text { b.append(["type": "text", "text": "[" + f.name + "]\n" + t]) }
+      }
+      if !m.text.isEmpty { b.append(["type": "text", "text": m.text]) }
+      return b
+    }
+    let ms: [[String: Any]] = msgs.map { ["role": $0.role, "content": blocks($0)] }
+    var req = URLRequest(url: url); var body: [String: Any]
+    if prov == 0 {
+      req.setValue(key, forHTTPHeaderField: "x-api-key"); req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+      body = ["model": model, "max_tokens": 4096, "system": system, "messages": ms]
+    } else {
+      req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
+      let sysMsg: [String: Any] = ["role": "system", "content": system]
+      body = ["model": model, "messages": [sysMsg] + ms]
+    }
+    req.httpMethod = "POST"; req.setValue("application/json", forHTTPHeaderField: "content-type"); req.timeoutInterval = 180
+    req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+    URLSession.shared.dataTask(with: req) { data, resp, err in
+      var ok = false, out = ""
+      if let err = err { out = String(format: T("请求失败:%@"), err.localizedDescription) }
+      else if let data = data, let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        if let e = j["error"] as? [String: Any] { out = String(format: T("请求失败:%@"), (e["message"] as? String) ?? "error") }
+        else if prov == 0 { out = ((j["content"] as? [[String: Any]]) ?? []).compactMap { $0["text"] as? String }.joined(); ok = true }
+        else { out = (((j["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any])?["content"] as? String) ?? ""; ok = true }
+      } else { out = String(format: T("请求失败:%@"), "HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0)") }
+      DispatchQueue.main.async { done(ok, out.isEmpty && ok ? T("(空回复)") : out) }
+    }.resume()
+  }
+}
+func pngData(_ i: NSImage?) -> Data? {
+  guard let t = i?.tiffRepresentation, let r = NSBitmapImageRep(data: t) else { return nil }
+  return r.representation(using: .png, properties: [:])
+}
+func loadAttach(_ u: URL) -> Attach? {   // 文件 / 图片 / PDF / 文件夹 → 可发给模型的附件
+  let e = u.pathExtension.lowercased(), n = u.lastPathComponent
+  var isDir: ObjCBool = false; FileManager.default.fileExists(atPath: u.path, isDirectory: &isDir)
+  if isDir.boolValue {
+    var names: [String] = []
+    if let en = FileManager.default.enumerator(at: u, includingPropertiesForKeys: nil, options: .skipsHiddenFiles) {
+      for case let x as URL in en { names.append(x.path.replacingOccurrences(of: u.path + "/", with: "")); if names.count >= 300 { break } }
+    }
+    return Attach(name: n + "/", text: names.joined(separator: "\n"), img: nil, mime: "")
+  }
+  if imgExts.contains(e) && e != "svg" {
+    guard let d = try? Data(contentsOf: u), d.count < 20_000_000 else { return nil }
+    let direct = ["png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"]
+    if let m = direct[e], d.count < 5_000_000 { return Attach(name: n, text: nil, img: d, mime: m) }
+    if let png = pngData(NSImage(data: d)) { return Attach(name: n, text: nil, img: png, mime: "image/png") }
+    return nil
+  }
+  if e == "pdf" { guard let t = PDFDocument(url: u)?.string else { return nil }; return Attach(name: n, text: String(t.prefix(150_000)), img: nil, mime: "") }
+  guard let d = try? Data(contentsOf: u), let (s, _, _) = decode(d) else { return nil }
+  return Attach(name: n, text: String(s.prefix(150_000)), img: nil, mime: "")
+}
+
+// 圆形 AI 按钮 · 原创标识「观」:杏仁形的眼 = 洞察与智慧;瞳孔处的四角星 = 一闪而过的灵感;
+// 倾斜的轨道环与光点 = 科幻 / 计算。眼宽取黄金分割 0.618,色彩只留一处暖色(星),其余是深海蓝与白。
+final class RoundButton: NSButton {
+  override func draw(_ dirtyRect: NSRect) {
+    let b = bounds.insetBy(dx: 1.5, dy: 1.5), m = NSPoint(x: bounds.midX, y: bounds.midY), r = b.width / 2, w = NSColor.white
+    NSGradient(starting: NSColor(calibratedRed: 0.09, green: 0.24, blue: 0.34, alpha: 1), ending: NSColor(calibratedRed: 0.02, green: 0.07, blue: 0.13, alpha: 1))!
+      .draw(in: NSBezierPath(ovalIn: b), angle: -90)
+    let rim = NSBezierPath(ovalIn: b.insetBy(dx: 0.5, dy: 0.5)); rim.lineWidth = 1; w.withAlphaComponent(0.16).setStroke(); rim.stroke()
+    var tf = AffineTransform(translationByX: m.x, byY: m.y); tf.rotate(byDegrees: -24)
+    let orbit = NSBezierPath(ovalIn: NSRect(x: -r * 0.82, y: -r * 0.27, width: r * 1.64, height: r * 0.54)); orbit.transform(using: tf)
+    orbit.lineWidth = 0.9; w.withAlphaComponent(0.38).setStroke(); orbit.stroke()
+    let a = r * 0.618, h = r * 0.25, eye = NSBezierPath()
+    eye.move(to: NSPoint(x: m.x - a, y: m.y))
+    eye.curve(to: NSPoint(x: m.x + a, y: m.y), controlPoint1: NSPoint(x: m.x - a * 0.45, y: m.y + h * 1.9), controlPoint2: NSPoint(x: m.x + a * 0.45, y: m.y + h * 1.9))
+    eye.curve(to: NSPoint(x: m.x - a, y: m.y), controlPoint1: NSPoint(x: m.x + a * 0.45, y: m.y - h * 1.9), controlPoint2: NSPoint(x: m.x - a * 0.45, y: m.y - h * 1.9))
+    eye.lineWidth = 1.5; eye.lineJoinStyle = .round; w.withAlphaComponent(0.94).setStroke(); eye.stroke()
+    let k = r * 0.13, star = NSBezierPath()
+    let pts: [(CGFloat, CGFloat)] = [(0, 2), (0.42, 0.42), (2, 0), (0.42, -0.42), (0, -2), (-0.42, -0.42), (-2, 0), (-0.42, 0.42)]
+    star.move(to: NSPoint(x: m.x + pts[0].0 * k, y: m.y + pts[0].1 * k))
+    for q in pts.dropFirst() { star.line(to: NSPoint(x: m.x + q.0 * k, y: m.y + q.1 * k)) }
+    star.close(); NSColor(calibratedRed: 0.98, green: 0.74, blue: 0.28, alpha: 1).setFill(); star.fill()
+    let t: CGFloat = 0.55, d = tf.transform(NSPoint(x: r * 0.82 * cos(t), y: r * 0.27 * sin(t)))
+    w.setFill(); NSBezierPath(ovalIn: NSRect(x: d.x - 1.7, y: d.y - 1.7, width: 3.4, height: 3.4)).fill()
+  }
+}
+// 图片标签页:可把图片拖出(拖进聊天框即作为附件)
+final class DragImageView: NSImageView, NSDraggingSource {
+  var fileURL: URL?
+  func draggingSession(_ s: NSDraggingSession, sourceOperationMaskFor c: NSDraggingContext) -> NSDragOperation { .copy }
+  override func mouseDragged(with e: NSEvent) {
+    guard let u = fileURL else { return }
+    let it = NSDraggingItem(pasteboardWriter: u as NSURL); it.setDraggingFrame(bounds, contents: image)
+    beginDraggingSession(with: [it], event: e, source: self)
+  }
+}
+final class ChatInput: NSTextView {
+  weak var pane: ChatPane?
+  override init(frame: NSRect, textContainer: NSTextContainer?) { super.init(frame: frame, textContainer: textContainer); registerForDraggedTypes([.fileURL, .png, .tiff]) }
+  override init(frame: NSRect) { super.init(frame: frame); registerForDraggedTypes([.fileURL, .png, .tiff]) }
+  required init?(coder: NSCoder) { fatalError() }
+  override func updateDragTypeRegistration() { super.updateDragTypeRegistration(); registerForDraggedTypes([.fileURL, .png, .tiff]) }
+  func media(_ pb: NSPasteboard) -> Bool {
+    pb.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) || pb.canReadObject(forClasses: [NSImage.self], options: nil)
+  }
+  override func draggingEntered(_ s: NSDraggingInfo) -> NSDragOperation { media(s.draggingPasteboard) ? .copy : super.draggingEntered(s) }
+  override func draggingUpdated(_ s: NSDraggingInfo) -> NSDragOperation { media(s.draggingPasteboard) ? .copy : super.draggingUpdated(s) }
+  override func performDragOperation(_ s: NSDraggingInfo) -> Bool { media(s.draggingPasteboard) ? (pane?.ingest(s.draggingPasteboard) ?? false) : super.performDragOperation(s) }
+  override func paste(_ sender: Any?) { if media(.general) { _ = pane?.ingest(.general) } else { super.paste(sender) } }
+}
+final class ChatPane: NSView, NSTextViewDelegate {
+  weak var doc: Doc?
+  let transcript = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 400)), input = ChatInput(frame: NSRect(x: 0, y: 0, width: 300, height: 70))
+  var logScroll: NSScrollView!, inScroll: NSScrollView!
+  let attLabel = NSTextField(labelWithString: ""), clearBtn = NSButton(), sendBtn = NSButton(), newBtn = NSButton()
+  var hist: [Msg] = [], atts: [Attach] = [], busy = false, last = ""
+
+  init(_ d: Doc) {
+    doc = d; super.init(frame: .zero)
+    registerForDraggedTypes([.fileURL, .png, .tiff, .string])
+    transcript.isEditable = false; transcript.unregisterDraggedTypes(); transcript.textContainerInset = NSSize(width: 8, height: 8)
+    transcript.backgroundColor = .controlBackgroundColor
+    input.isRichText = false; input.font = .systemFont(ofSize: 13); input.allowsUndo = true; input.isAutomaticQuoteSubstitutionEnabled = false
+    input.textContainerInset = NSSize(width: 4, height: 4); input.delegate = self; input.pane = self
+    logScroll = makeScroll(transcript); inScroll = makeScroll(input); inScroll.borderType = .bezelBorder
+    attLabel.font = .systemFont(ofSize: 11); attLabel.textColor = .secondaryLabelColor; attLabel.lineBreakMode = .byTruncatingTail
+    attLabel.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(250), for: .horizontal)
+    for (b, a) in [(clearBtn, #selector(clearAtts)), (sendBtn, #selector(send)), (newBtn, #selector(newChat))] {
+      b.bezelStyle = .rounded; b.controlSize = .small; b.target = self; b.action = a
+    }
+    clearBtn.bezelStyle = .inline; sendBtn.keyEquivalent = ""
+    let sp = NSView(); sp.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+    let attBar = NSStackView(views: [attLabel, clearBtn]), btnRow = NSStackView(views: [sp, newBtn, sendBtn])
+    for v in [logScroll!, attBar, inScroll!, btnRow] { v.translatesAutoresizingMaskIntoConstraints = false; addSubview(v) }
+    let edge = NSBox(); edge.boxType = .separator; edge.translatesAutoresizingMaskIntoConstraints = false; addSubview(edge)
+    NSLayoutConstraint.activate([edge.leadingAnchor.constraint(equalTo: leadingAnchor), edge.topAnchor.constraint(equalTo: topAnchor), edge.bottomAnchor.constraint(equalTo: bottomAnchor), edge.widthAnchor.constraint(equalToConstant: 1)])
+    NSLayoutConstraint.activate([
+      logScroll.topAnchor.constraint(equalTo: topAnchor), logScroll.leadingAnchor.constraint(equalTo: leadingAnchor), logScroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+      logScroll.bottomAnchor.constraint(equalTo: attBar.topAnchor, constant: -6),
+      attBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10), attBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+      attBar.bottomAnchor.constraint(equalTo: inScroll.topAnchor, constant: -4),
+      inScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10), inScroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+      inScroll.heightAnchor.constraint(equalToConstant: 76), inScroll.bottomAnchor.constraint(equalTo: btnRow.topAnchor, constant: -6),
+      btnRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10), btnRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+      btnRow.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10)])
+    localize()
+  }
+  required init?(coder: NSCoder) { fatalError() }
+  func localize() {
+    clearBtn.title = T("清除"); sendBtn.title = busy ? T("发送中…") : T("发送"); newBtn.title = T("新对话"); updAtt()
+  }
+  func updAtt() {
+    attLabel.stringValue = atts.isEmpty ? T("拖入文字、图片或文件到这里") : String(format: T("附件(%ld):%@"), atts.count, atts.map { $0.name }.joined(separator: ", "))
+    clearBtn.isHidden = atts.isEmpty
+  }
+  func add(_ who: String, _ text: String) {
+    let a = NSMutableAttributedString(string: who + "\n", attributes: [.font: NSFont.boldSystemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
+    a.append(NSAttributedString(string: text + "\n\n", attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.labelColor]))
+    transcript.textStorage?.append(a); transcript.scrollToEndOfDocument(nil)
+  }
+  @discardableResult func ingest(_ pb: NSPasteboard) -> Bool {   // 拖入/粘贴:文件→附件,图片→附件,文字→输入框
+    if let us = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !us.isEmpty {
+      for u in us { if let a = loadAttach(u) { atts.append(a) } else { add("Notapple", String(format: T("无法读取该文件:%@"), u.lastPathComponent)) } }
+      updAtt(); return true
+    }
+    if let i = NSImage(pasteboard: pb), let d = pngData(i) { atts.append(Attach(name: "image.png", text: nil, img: d, mime: "image/png")); updAtt(); return true }
+    if let s = pb.string(forType: .string) { input.insertText(s, replacementRange: input.selectedRange()); return true }
+    return false
+  }
+  override func draggingEntered(_ s: NSDraggingInfo) -> NSDragOperation { .copy }
+  override func performDragOperation(_ s: NSDraggingInfo) -> Bool { ingest(s.draggingPasteboard) }
+  func textView(_ t: NSTextView, doCommandBy sel: Selector) -> Bool {   // Enter 发送,Shift+Enter 换行
+    guard sel == #selector(NSResponder.insertNewline(_:)), !(NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false) else { return false }
+    send(); return true
+  }
+  @objc func clearAtts() { atts = []; updAtt() }
+  @objc func newChat() { hist = []; atts = []; transcript.string = ""; updAtt() }
+  @objc func send() {
+    let q = input.string.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !busy, !q.isEmpty || !atts.isEmpty else { return }
+    let m = Msg(role: "user", text: q, files: atts); hist.append(m)
+    add(T("我") + (atts.isEmpty ? "" : "  [" + atts.map { $0.name }.joined(separator: ", ") + "]"), q.isEmpty ? "—" : q)
+    input.string = ""; atts = []; busy = true; localize()
+    let sys = T("你是嵌入在文本编辑器 Notapple 中的 AI 协作助手,回答简洁、可直接用于文档。")
+    AI.ask(hist, system: sys) { [weak self] ok, r in
+      guard let s = self else { return }
+      s.busy = false
+      if ok { s.hist.append(Msg(role: "assistant", text: r, files: [])); s.last = r; s.add("AI", r) }
+      else { s.hist.removeLast(); s.input.string = q; s.atts = m.files; s.add("Notapple", r) }
+      s.localize()
+    }
+  }
+}
+final class Settings: NSObject, NSWindowDelegate {
+  static let shared = Settings()
+  var win: NSWindow?
+  let lang = NSPopUpButton(frame: .zero, pullsDown: false), prov = NSPopUpButton(frame: .zero, pullsDown: false)
+  let base = NSTextField(), model = NSTextField(), key = NSSecureTextField()
+  override init() {
+    super.init()
+    for v in [lang, prov, base, model, key] as [NSView] { v.widthAnchor.constraint(equalToConstant: 280).isActive = true }
+    prov.target = self; prov.action = #selector(provChanged)
+  }
+  func row(_ t: String, _ v: NSView) -> NSStackView {
+    let l = NSTextField(labelWithString: t); l.alignment = .right; l.widthAnchor.constraint(equalToConstant: 96).isActive = true
+    let s = NSStackView(views: [l, v]); s.spacing = 10; return s
+  }
+  func show() { build(); win?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+  func build() {
+    let d = UserDefaults.standard, p = d.integer(forKey: "ai.provider")
+    if win == nil {
+      let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+      w.isReleasedWhenClosed = false; w.delegate = self; w.isExcludedFromWindowsMenu = true; w.center(); win = w
+    }
+    win?.title = T("设置")
+    lang.removeAllItems(); lang.addItems(withTitles: ["中文", "English"]); lang.selectItem(at: isEN ? 1 : 0)
+    prov.removeAllItems(); prov.addItems(withTitles: ["Anthropic (Claude)", T("OpenAI 兼容")]); prov.selectItem(at: p)
+    base.stringValue = d.string(forKey: "ai.base") ?? AI.defs[p].0; model.stringValue = d.string(forKey: "ai.model") ?? AI.defs[p].1; key.stringValue = Keychain.get() ?? ""
+    let sep = NSBox(); sep.boxType = .separator; sep.widthAnchor.constraint(equalToConstant: 390).isActive = true
+    let note = NSTextField(wrappingLabelWithString: T("API 密钥保存在系统钥匙串中,仅用于调用你配置的接口。") + "\n" + T("部分系统菜单项(如“窗口”)的语言需重启后切换。")); note.font = .systemFont(ofSize: 11); note.textColor = .secondaryLabelColor
+    note.preferredMaxLayoutWidth = 390
+    let cancel = NSButton(title: T("取消"), target: self, action: #selector(cancelTap)), apply = NSButton(title: T("应用"), target: self, action: #selector(applyTap)), ok = NSButton(title: T("确定"), target: self, action: #selector(okTap))
+    cancel.keyEquivalent = "\u{1b}"; ok.keyEquivalent = "\r"
+    let sp = NSView(); sp.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+    let bar = NSStackView(views: [sp, cancel, apply, ok]); bar.widthAnchor.constraint(equalToConstant: 390).isActive = true
+    let st = NSStackView(views: [row(T("界面语言"), lang), sep, row(T("接口类型"), prov), row(T("接口地址"), base), row(T("模型名称"), model), row(T("API 密钥"), key), note, bar])
+    st.orientation = .vertical; st.alignment = .leading; st.spacing = 12; st.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
+    win?.contentView = st; win?.setContentSize(st.fittingSize)
+  }
+  func save() {
+    let d = UserDefaults.standard
+    d.set(prov.indexOfSelectedItem, forKey: "ai.provider"); d.set(base.stringValue, forKey: "ai.base"); d.set(model.stringValue, forKey: "ai.model"); Keychain.set(key.stringValue)
+  }
+  func commit() {   // 保存全部修改(语言 + AI 配置)
+    save()
+    let en = lang.indexOfSelectedItem == 1
+    let changed = en != isEN
+    if changed { (NSApp.delegate as? App)?.applyLang(en) }
+    build()
+    if changed { askRestart() }
+  }
+  func askRestart() {   // “窗口”等系统菜单的语言由系统在启动时决定,切换后需重启
+    let dirty = docs.contains { $0.win.isDocumentEdited }
+    let a = NSAlert(); a.messageText = T("语言已切换"); a.informativeText = T("“窗口”等系统菜单需要重启后才会切换语言。")
+    if !dirty { a.addButton(withTitle: T("立即重启")) }
+    a.addButton(withTitle: T("稍后"))
+    if !dirty && a.runModal() == .alertFirstButtonReturn {
+      let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/sh"); p.arguments = ["-c", "sleep 1; open \"" + Bundle.main.bundlePath + "\""]
+      try? p.run(); NSApp.terminate(nil)
+    } else if dirty { a.runModal() }
+  }
+  @objc func applyTap() { commit() }                    // 应用:保存,不关闭
+  @objc func okTap() { commit(); win?.close() }         // 确定:保存并关闭
+  @objc func cancelTap() { win?.close() }               // 取消:不保存并关闭(下次打开会从已保存的值重新载入)
+  @objc func provChanged() {
+    let p = prov.indexOfSelectedItem, o = 1 - p
+    if [AI.defs[o].0, ""].contains(base.stringValue) { base.stringValue = AI.defs[p].0 }
+    if [AI.defs[o].1, ""].contains(model.stringValue) { model.stringValue = AI.defs[p].1 }
+    save()
+  }
 }
 
 // MARK: 拖放:把文件/文件夹拖进窗口即可打开
@@ -507,6 +867,10 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
   let scroll = makeScroll()
   let status = NSTextField(labelWithString: "")
   let split = NSSplitView(), area = NSView(), side = Sidebar()
+  let encPop = NSPopUpButton(frame: .zero, pullsDown: false)
+  let chatHost = NSView(), chatBtn = RoundButton()
+  var chat: ChatPane?
+  var trailFull: NSLayoutConstraint!, trailChat: NSLayoutConstraint!
   var tv: NSTextView { scroll.documentView as! NSTextView }
   var url: URL?, enc = String.Encoding.utf8, bom = false, lang: Lang?, size: CGFloat = 13, wrap = true, eol = "LF"
   var work: DispatchWorkItem?
@@ -514,7 +878,7 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
 
   init(_ u: URL?) {
     super.init()
-    win.title = T("未命名"); win.tabbingMode = .preferred; win.tabbingIdentifier = "ed"; win.isReleasedWhenClosed = false; win.delegate = self
+    win.title = T("未命名"); win.tabbingMode = .preferred; win.tabbingIdentifier = "ed"; win.isReleasedWhenClosed = false; win.delegate = self; win.isExcludedFromWindowsMenu = true
     let t = tv
     t.isRichText = false; t.allowsUndo = true; t.delegate = self; t.textContainerInset = NSSize(width: 4, height: 6)
     t.isAutomaticQuoteSubstitutionEnabled = false; t.isAutomaticDashSubstitutionEnabled = false
@@ -523,19 +887,28 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
     setSize(13)
     scroll.hasVerticalRuler = true; scroll.rulersVisible = true; scroll.verticalRulerView = Gutter(scroll, t)
     status.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular); status.textColor = .secondaryLabelColor
+    encPop.addItems(withTitles: encs.map { $0.0 }); encPop.controlSize = .small; encPop.font = .systemFont(ofSize: 11)
+    encPop.bezelStyle = .inline; encPop.target = self; encPop.action = #selector(encChanged)
     let root = DropView(); win.contentView = root
     split.isVertical = true; split.dividerStyle = .thin
     scroll.translatesAutoresizingMaskIntoConstraints = false; area.addSubview(scroll)
-    split.addArrangedSubview(side.view); split.addArrangedSubview(area); side.view.isHidden = true
+    split.addArrangedSubview(side.view); split.addArrangedSubview(area); side.view.isHidden = true; chatHost.isHidden = true
     split.setHoldingPriority(NSLayoutConstraint.Priority(260), forSubviewAt: 0)
-    for v in [split, status] { v.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(v) }
+    chatBtn.title = ""; chatBtn.isBordered = false; chatBtn.target = self; chatBtn.action = #selector(toggleChat); chatBtn.toolTip = T("AI 协作")
+    trailFull = split.trailingAnchor.constraint(equalTo: root.trailingAnchor); trailChat = split.trailingAnchor.constraint(equalTo: chatHost.leadingAnchor)
+    for v in [split, status, encPop, chatBtn, chatHost] { v.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(v) }
     NSLayoutConstraint.activate([
       scroll.topAnchor.constraint(equalTo: area.topAnchor), scroll.leadingAnchor.constraint(equalTo: area.leadingAnchor),
       scroll.trailingAnchor.constraint(equalTo: area.trailingAnchor), scroll.bottomAnchor.constraint(equalTo: area.bottomAnchor),
       split.topAnchor.constraint(equalTo: root.topAnchor), split.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-      split.trailingAnchor.constraint(equalTo: root.trailingAnchor), split.bottomAnchor.constraint(equalTo: status.topAnchor, constant: -3),
-      status.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10), status.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-      status.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -4)])
+      trailFull, split.bottomAnchor.constraint(equalTo: encPop.topAnchor, constant: -3),
+      chatHost.topAnchor.constraint(equalTo: root.topAnchor), chatHost.bottomAnchor.constraint(equalTo: split.bottomAnchor),
+      chatHost.trailingAnchor.constraint(equalTo: root.trailingAnchor), chatHost.widthAnchor.constraint(equalToConstant: 300),
+      encPop.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8), encPop.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -4),
+      status.leadingAnchor.constraint(equalTo: encPop.trailingAnchor, constant: 8), status.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+      status.centerYAnchor.constraint(equalTo: encPop.centerYAnchor),
+      chatBtn.widthAnchor.constraint(equalToConstant: 38), chatBtn.heightAnchor.constraint(equalToConstant: 38),
+      chatBtn.trailingAnchor.constraint(equalTo: area.trailingAnchor, constant: -24), chatBtn.bottomAnchor.constraint(equalTo: area.bottomAnchor, constant: -16)])
     docs.append(self)
     if let k = cur(), k !== self, docs.count > 1 { docs[docs.count - 2].win.addTabbedWindow(win, ordered: .above) }
     win.makeKeyAndOrderFront(nil); updateSidebar()
@@ -562,6 +935,29 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
     let ins = pre + body + post
     edit(NSRange(location: idx, length: 0), ins)
     tv.setSelectedRange(NSRange(location: idx + (pre + body).utf16.count, length: 0)); win.makeFirstResponder(tv)
+  }
+  @objc func toggleChat() {   // 圆形按钮:唤出 / 收起右侧 AI 协作栏(固定 300pt 宽)
+    if chatHost.isHidden {
+      if chat == nil {
+        let c = ChatPane(self); c.translatesAutoresizingMaskIntoConstraints = false; chatHost.addSubview(c)
+        NSLayoutConstraint.activate([c.topAnchor.constraint(equalTo: chatHost.topAnchor), c.bottomAnchor.constraint(equalTo: chatHost.bottomAnchor),
+          c.leadingAnchor.constraint(equalTo: chatHost.leadingAnchor), c.trailingAnchor.constraint(equalTo: chatHost.trailingAnchor)])
+        chat = c
+      }
+      chatHost.isHidden = false; trailFull.isActive = false; trailChat.isActive = true; win.makeFirstResponder(chat?.input)
+    } else {
+      chatHost.isHidden = true; trailChat.isActive = false; trailFull.isActive = true
+      if reading { win.makeFirstResponder(web) } else { win.makeFirstResponder(tv) }
+    }
+  }
+  func autoLang() { lang = url.flatMap(detect) ?? sniff(tv.string) }   // 扩展名优先,否则按内容自动识别
+  func syncEnc() { encPop.selectItem(at: encs.firstIndex { $0.1 == enc && $0.2 == bom } ?? 0) }
+  @objc func encChanged() {   // 底栏切换编码 = 转换为该编码(保存时生效)
+    let e = encs[max(0, encPop.indexOfSelectedItem)]
+    if tv.string.data(using: e.1, allowLossyConversion: false) == nil {
+      let a = NSAlert(); a.messageText = String(format: T("无法用 %@ 表示当前文本中的部分字符"), e.0); a.runModal(); syncEnc(); return
+    }
+    enc = e.1; bom = e.2; win.isDocumentEdited = true; refresh()
   }
   func updateSidebar() {
     guard let r = folderRoot else { side.view.isHidden = true; split.adjustSubviews(); return }
@@ -594,16 +990,16 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
     }
     if u.pathExtension.lowercased() == "pdf" {
       let p = PDFView(); p.document = PDFDocument(url: u); p.autoScales = true
-      p.translatesAutoresizingMaskIntoConstraints = false; scroll.isHidden = true; status.stringValue = T("PDF(只读预览)")
+      p.translatesAutoresizingMaskIntoConstraints = false; scroll.isHidden = true; encPop.isHidden = true; status.stringValue = T("PDF(只读预览)")
       area.addSubview(p)
       NSLayoutConstraint.activate([p.topAnchor.constraint(equalTo: area.topAnchor), p.leadingAnchor.constraint(equalTo: area.leadingAnchor),
         p.trailingAnchor.constraint(equalTo: area.trailingAnchor), p.bottomAnchor.constraint(equalTo: area.bottomAnchor)])
       return
     }
     if ["png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "heic", "heif", "ico", "icns"].contains(u.pathExtension.lowercased()), let img = NSImage(contentsOf: u) {
-      let v = NSImageView(image: img); v.isEditable = false; v.imageScaling = .scaleProportionallyDown; v.animates = true
+      let v = DragImageView(image: img); v.fileURL = u; v.isEditable = false; v.imageScaling = .scaleProportionallyDown; v.animates = true
       for o: NSLayoutConstraint.Orientation in [.horizontal, .vertical] { v.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: o); v.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: o) }
-      v.translatesAutoresizingMaskIntoConstraints = false; scroll.isHidden = true; area.addSubview(v)
+      v.translatesAutoresizingMaskIntoConstraints = false; scroll.isHidden = true; encPop.isHidden = true; area.addSubview(v)
       NSLayoutConstraint.activate([v.topAnchor.constraint(equalTo: area.topAnchor), v.leadingAnchor.constraint(equalTo: area.leadingAnchor),
         v.trailingAnchor.constraint(equalTo: area.trailingAnchor), v.bottomAnchor.constraint(equalTo: area.bottomAnchor)])
       let px = (img.representations.first as? NSBitmapImageRep).map { ($0.pixelsWide, $0.pixelsHigh) } ?? (Int(img.size.width), Int(img.size.height))
@@ -614,18 +1010,20 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
       let a = NSAlert(); a.messageText = String(format: T("无法作为文本打开:%@"), u.lastPathComponent); a.informativeText = T("文件看起来是二进制。"); a.runModal(); win.close(); return
     }
     enc = e; bom = b; eol = s.contains("\r\n") ? "CRLF" : (s.contains("\r") ? "CR" : "LF")
-    tv.string = s; lang = detect(u); highlight(); win.isDocumentEdited = false; refresh()
+    tv.string = s; autoLang(); highlight(); win.isDocumentEdited = false; refresh()
     if readingMode { setReading(true) }   // 新打开的 Markdown 跟随全局模式
   }
   func save(_ asNew: Bool) {
     var u = url
     if u == nil || asNew { let p = NSSavePanel(); guard p.runModal() == .OK else { return }; u = p.url }
     guard let t = u else { return }
-    var d = tv.string.data(using: enc, allowLossyConversion: false) ?? Data()
+    guard var d = tv.string.data(using: enc, allowLossyConversion: false) else {
+      let a = NSAlert(); a.messageText = T("当前编码无法表示文本中的部分字符,未写入文件"); a.runModal(); return
+    }
     if bom && enc == .utf8 { d = Data([0xEF, 0xBB, 0xBF]) + d }
     do { try d.write(to: t, options: .atomic) } catch { NSAlert(error: error).runModal(); return }
     url = t; win.title = t.lastPathComponent; win.representedURL = t; win.isDocumentEdited = false
-    lang = detect(t); highlight(); refresh()
+    autoLang(); highlight(); refresh()
   }
   func edit(_ r: NSRange, _ s: String) {
     if tv.shouldChangeText(in: r, replacementString: s) { tv.textStorage?.replaceCharacters(in: r, with: s); tv.didChangeText() }
@@ -666,12 +1064,12 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
     let s = tv.string as NSString, p = tv.selectedRange().location
     var ln = 1, last = 0, i = 0
     for u in s.substring(to: min(p, s.length)).utf16 { i += 1; if u == 10 { ln += 1; last = i } }
-    let encName = encs.first { $0.1 == enc && $0.2 == bom }?.0 ?? T("文本")
-    status.stringValue = String(format: T("行 %ld, 列 %ld  |  %ld 字符  |  %@  |  %@  |  %@"), ln, p - last + 1, s.length, lang?.name ?? T("纯文本"), encName, eol)
+    syncEnc()
+    status.stringValue = String(format: T("行 %ld, 列 %ld  |  %ld 字符  |  %@  |  %@"), ln, p - last + 1, s.length, lang?.name ?? T("纯文本"), eol)
   }
   func textDidChange(_ n: Notification) {
     win.isDocumentEdited = true; refresh(); work?.cancel()
-    let w = DispatchWorkItem { [weak self] in self?.highlight() }; work = w
+    let w = DispatchWorkItem { [weak self] in self?.autoLang(); self?.highlight(); self?.refresh() }; work = w
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: w)
   }
   func textViewDidChangeSelection(_ n: Notification) { refresh() }
@@ -769,7 +1167,7 @@ func writeIconset(_ dir: String) {
 }
 
 // MARK: 应用与菜单
-final class App: NSObject, NSApplicationDelegate {
+final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation {
   func openURL(_ u: URL) {
     if let d = docs.first(where: { $0.url == u }) { d.win.makeKeyAndOrderFront(nil); return }
     if let c = cur(), c.url == nil, !c.win.isDocumentEdited, c.tv.string.isEmpty { c.load(u) } else { _ = Doc(u) }
@@ -797,102 +1195,62 @@ final class App: NSObject, NSApplicationDelegate {
   }
   func buildMenu() {
     NSApp.mainMenu = NSMenu()
-    let a = sub("Notapple"); add(a, T("退出 Notapple"), #selector(NSApplication.terminate(_:)), "q")
+    let a = sub("Notapple"); add(a, T("设置…"), #selector(openSettings), ","); a.addItem(.separator()); add(a, T("退出 Notapple"), #selector(NSApplication.terminate(_:)), "q")
     let f = sub(T("文件"))
-    add(f, T("新建标签页"), #selector(newDoc), "n"); add(f, T("打开…"), #selector(openDlg), "o"); add(f, T("打开文件夹…"), #selector(openFolder), "o", [.command, .shift]); add(f, T("关闭文件夹"), #selector(closeFolder)); add(f, T("保存"), #selector(save), "s")
-    add(f, T("另存为…"), #selector(saveAs), "s", [.command, .shift]); add(f, T("关闭标签页"), #selector(NSWindow.performClose(_:)), "w")
+    add(f, T("新建标签页"), #selector(newDoc), "n"); add(f, T("打开…"), #selector(openDlg), "o"); add(f, T("关闭文件夹"), #selector(closeFolder))
+    add(f, T("保存"), #selector(save), "s"); add(f, T("另存为…"), #selector(saveAs), "s", [.command, .shift]); add(f, T("关闭标签页"), #selector(NSWindow.performClose(_:)), "w")
     let e = sub(T("编辑"))
-    add(e, T("撤销"), Selector(("undo:")), "z"); add(e, T("重做"), Selector(("redo:")), "z", [.command, .shift])
+    add(e, T("撤销"), #selector(undoCmd), "z"); add(e, T("重做"), #selector(redoCmd), "z", [.command, .shift])
     add(e, T("剪切"), #selector(NSText.cut(_:)), "x"); add(e, T("拷贝"), #selector(NSText.copy(_:)), "c")
     add(e, T("粘贴"), #selector(NSText.paste(_:)), "v"); add(e, T("全选"), #selector(NSText.selectAll(_:)), "a")
     e.addItem(.separator())
-    add(e, T("查找 / 替换…"), #selector(find), "f"); add(e, T("查找下一个"), #selector(findNext), "g"); add(e, T("跳转到行…"), #selector(goLine), "l")
+    add(e, T("查找 / 替换…"), #selector(find), "f")
     e.addItem(.separator())
-    add(e, T("复制当前行"), #selector(dup), "d"); add(e, T("删除当前行"), #selector(delLine), "k", [.command, .shift])
-    add(e, T("上移一行"), #selector(up), String(UnicodeScalar(NSUpArrowFunctionKey)!), [.control, .shift])
-    add(e, T("下移一行"), #selector(down), String(UnicodeScalar(NSDownArrowFunctionKey)!), [.control, .shift])
-    add(e, T("切换行注释"), #selector(comment), "/")
-    add(e, T("转大写"), #selector(upper), "u", [.command, .shift]); add(e, T("转小写"), #selector(lower), "u", [.command, .option])
-    add(e, T("行排序"), #selector(sortL)); add(e, T("删除重复行"), #selector(dedupe)); add(e, T("去除行尾空白"), #selector(trim))
-    let el = NSMenu(title: T("换行符")); let eli = e.addItem(withTitle: T("换行符转换"), action: nil, keyEquivalent: ""); eli.submenu = el
-    for (i, t) in ["LF (Unix)", "CRLF (Windows)", T("CR (旧 Mac)")].enumerated() { add(el, t, #selector(setEOL(_:)), "", [], tag: i) }
+    add(e, T("删除重复行"), #selector(dedupe)); add(e, T("去除行尾空白"), #selector(trim))
     let v = sub(T("视图"))
-    add(v, T("自动换行"), #selector(toggleWrap), "w", [.option]); add(v, T("放大"), #selector(bigger), "+"); add(v, T("缩小"), #selector(smaller), "-"); add(v, T("切换阅读/编辑模式"), #selector(toggleRead), ".")
-    let en = sub(T("编码")); for (i, x) in encs.enumerated() { add(en, String(format: T("以 %@ 保存"), x.0), #selector(setEnc(_:)), "", [], tag: i) }
-    let lg = sub(T("语法高亮")); add(lg, T("纯文本"), #selector(setLang(_:)), "", [], tag: -1)
-    for (i, l) in langs.enumerated() { add(lg, l.name, #selector(setLang(_:)), "", [], tag: i) }
-    let ui = sub(T("界面语言")); add(ui, T("中文"), #selector(setUI(_:)), "", [], tag: 0); add(ui, "English", #selector(setUI(_:)), "", [], tag: 1)
-    ui.items[0].state = isEN ? .off : .on; ui.items[1].state = isEN ? .on : .off
-    let w = sub(T("窗口")); NSApp.windowsMenu = w
-    add(w, T("下一个标签页"), #selector(NSWindow.selectNextTab(_:)), "\t", .control); add(w, T("上一个标签页"), #selector(NSWindow.selectPreviousTab(_:)), "\t", [.control, .shift])
+    add(v, T("自动换行"), #selector(toggleWrap), "w", [.option]); add(v, T("放大"), #selector(bigger), "+"); add(v, T("缩小"), #selector(smaller), "-"); add(v, T("切换阅读/编辑模式"), #selector(toggleRead), "."); add(v, T("AI 协作"), #selector(toggleAI), "a", [.command, .option])
+    let w = sub(T("窗口")); w.delegate = self; NSApp.windowsMenu = w   // 仅保留系统提供的 Fill / Center / Move & Resize / Full Screen Tile
   }
-  @objc func openFolder() {
-    let p = NSOpenPanel(); p.canChooseDirectories = true; p.canChooseFiles = false
-    if p.runModal() == .OK { folderRoot = p.url; docs.forEach { $0.updateSidebar() } }
+  func menuWillOpen(_ m: NSMenu) { prune(m) }
+  func menuNeedsUpdate(_ m: NSMenu) { prune(m) }
+  func prune(_ m: NSMenu) {   // 去掉系统自动加入的 最小化/缩放/标签页/窗口列表 等项
+    let bad: Set<String> = ["performMiniaturize:", "performZoom:", "arrangeInFront:", "selectNextTab:", "selectPreviousTab:", "moveTabToNewWindow:", "mergeAllWindows:", "toggleTabBar:", "toggleTabOverview:", "makeKeyAndOrderFront:"]
+    for it in m.items.reversed() where (it.action.map { bad.contains(NSStringFromSelector($0)) } ?? false) || it.target is NSWindow { m.removeItem(it) }
+    while let f = m.items.first, f.isSeparatorItem { m.removeItem(f) }
+    while let l = m.items.last, l.isSeparatorItem { m.removeItem(l) }
+    var k = 1; while k < m.items.count { if m.items[k].isSeparatorItem && m.items[k - 1].isSeparatorItem { m.removeItem(at: k) } else { k += 1 } }
   }
   @objc func closeFolder() { folderRoot = nil; docs.forEach { $0.updateSidebar() } }
-  @objc func setUI(_ i: NSMenuItem) {
-    isEN = i.tag == 1; UserDefaults.standard.set(isEN ? "en" : "zh", forKey: "ui"); buildMenu()
-    for d in docs { if d.url == nil { d.win.title = T("未命名") }; d.refresh() }
+  func applyLang(_ en: Bool) {
+    isEN = en; UserDefaults.standard.set(en ? "en" : "zh", forKey: "ui"); UserDefaults.standard.set(en ? ["en"] : ["zh-Hans", "en"], forKey: "AppleLanguages"); buildMenu()
+    for d in docs { if d.url == nil { d.win.title = T("未命名") }; d.refresh(); d.chat?.localize(); d.chatBtn.toolTip = T("AI 协作") }
     Finder.shared.localize()
   }
+  @objc func openSettings() { Settings.shared.show() }
+  @objc func toggleAI() { cur()?.toggleChat() }
+  func ur() -> UndoManager? { (NSApp.keyWindow?.firstResponder as? NSTextView)?.undoManager }   // 作用于当前输入框(编辑区 / 聊天框 / 设置)
+  @objc func undoCmd() { ur()?.undo() }
+  @objc func redoCmd() { ur()?.redo() }
+  func validateMenuItem(_ i: NSMenuItem) -> Bool {
+    if i.action == #selector(undoCmd) { return ur()?.canUndo ?? false }
+    if i.action == #selector(redoCmd) { return ur()?.canRedo ?? false }
+    return true
+  }
   @objc func newDoc() { _ = Doc(nil) }
-  @objc func openDlg() { let p = NSOpenPanel(); p.allowsMultipleSelection = true; if p.runModal() == .OK { p.urls.forEach(openURL) } }
+  @objc func openDlg() {   // 一个入口同时打开文件和文件夹
+    let p = NSOpenPanel(); p.canChooseFiles = true; p.canChooseDirectories = true; p.allowsMultipleSelection = true
+    if p.runModal() == .OK { openItems(p.urls) }
+  }
   @objc func save() { cur()?.save(false) }
   @objc func saveAs() { cur()?.save(true) }
   @objc func find() { Finder.shared.show() }
-  @objc func findNext() { Finder.shared.next() }
-  @objc func goLine() {
-    guard let d = cur() else { return }
-    let a = NSAlert(); a.messageText = T("跳转到行"); let t = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24)); a.accessoryView = t
-    a.addButton(withTitle: T("跳转")); a.addButton(withTitle: T("取消")); a.window.initialFirstResponder = t
-    guard a.runModal() == .alertFirstButtonReturn, let n = Int(t.stringValue) else { return }
-    let s = d.tv.string as NSString; var i = 0
-    for _ in 1..<max(n, 1) { let nx = NSMaxRange(s.lineRange(for: NSRange(location: i, length: 0))); if nx >= s.length { break }; i = nx }
-    d.tv.setSelectedRange(NSRange(location: i, length: 0)); d.tv.scrollRangeToVisible(NSRange(location: i, length: 0)); d.win.makeFirstResponder(d.tv)
-  }
-  func lines(_ d: Doc) -> (NSString, NSRange) { let s = d.tv.string as NSString; return (s, s.lineRange(for: d.tv.selectedRange())) }
-  @objc func dup() { guard let d = cur() else { return }; let (s, r) = lines(d); var t = s.substring(with: r); if !t.hasSuffix("\n") { t = "\n" + t }; d.edit(NSRange(location: NSMaxRange(r), length: 0), t) }
-  @objc func delLine() { guard let d = cur() else { return }; d.edit(lines(d).1, "") }
-  @objc func up() { move(-1) }
-  @objc func down() { move(1) }
-  func move(_ k: Int) {
-    guard let d = cur() else { return }; let (s, r) = lines(d); let o: NSRange
-    if k < 0 { guard r.location > 0 else { return }; o = s.lineRange(for: NSRange(location: r.location - 1, length: 0)) }
-    else { guard NSMaxRange(r) < s.length else { return }; o = s.lineRange(for: NSRange(location: NSMaxRange(r), length: 0)) }
-    let (a, b) = k < 0 ? (o, r) : (r, o)
-    var x = s.substring(with: a), y = s.substring(with: b)
-    if !y.hasSuffix("\n") { y += "\n"; x.removeLast() }
-    d.edit(NSUnionRange(a, b), y + x)
-    d.tv.setSelectedRange(k < 0 ? NSRange(location: a.location, length: y.utf16.count) : NSRange(location: a.location + y.utf16.count, length: x.utf16.count))
-  }
-  @objc func comment() {
-    guard let d = cur() else { return }; let p = d.lang?.lc ?? "#"; let (s, r) = lines(d)
-    let ls = s.substring(with: r).components(separatedBy: "\n")
-    let ne = ls.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-    let on = !ne.isEmpty && ne.allSatisfy { $0.trimmingCharacters(in: .whitespaces).hasPrefix(p) }
-    d.edit(r, ls.map { l in
-      if l.trimmingCharacters(in: .whitespaces).isEmpty { return l }
-      if on, let g = l.range(of: p) { var n = l; n.removeSubrange(g); if g.lowerBound < n.endIndex && n[g.lowerBound] == " " { n.remove(at: g.lowerBound) }; return n }
-      return p + " " + l }.joined(separator: "\n"))
-  }
   func xf(_ f: (String) -> String) {
     guard let d = cur() else { return }; var r = d.tv.selectedRange(); let s = d.tv.string as NSString
     if r.length == 0 { r = NSRange(location: 0, length: s.length) }
     d.edit(r, f(s.substring(with: r)))
   }
-  @objc func upper() { xf { $0.uppercased() } }
-  @objc func lower() { xf { $0.lowercased() } }
-  @objc func sortL() { xf { $0.components(separatedBy: "\n").sorted().joined(separator: "\n") } }
   @objc func dedupe() { xf { var seen = Set<String>(); return $0.components(separatedBy: "\n").filter { seen.insert($0).inserted }.joined(separator: "\n") } }
   @objc func trim() { xf { $0.components(separatedBy: "\n").map { l in l.replacingOccurrences(of: #"[ \t]+$"#, with: "", options: .regularExpression) }.joined(separator: "\n") } }
-  @objc func setEOL(_ i: NSMenuItem) {
-    guard let d = cur() else { return }; let e = ["\n", "\r\n", "\r"][i.tag]; let s = d.tv.string
-    d.edit(NSRange(location: 0, length: (s as NSString).length), s.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n").replacingOccurrences(of: "\n", with: e))
-    d.eol = ["LF", "CRLF", "CR"][i.tag]; d.refresh()
-  }
-  @objc func setEnc(_ i: NSMenuItem) { guard let d = cur() else { return }; d.enc = encs[i.tag].1; d.bom = encs[i.tag].2; d.win.isDocumentEdited = true; d.refresh() }
-  @objc func setLang(_ i: NSMenuItem) { guard let d = cur() else { return }; d.lang = i.tag < 0 ? nil : langs[i.tag]; d.highlight(); d.refresh() }
   @objc func toggleWrap() { guard let d = cur() else { return }; d.setWrap(!d.wrap) }
   @objc func toggleRead() {
     guard let c = cur() else { return }
@@ -906,5 +1264,6 @@ final class App: NSObject, NSApplicationDelegate {
 }
 
 if CommandLine.arguments.count > 2, CommandLine.arguments[1] == "--make-icon" { _ = NSApplication.shared; writeIconset(CommandLine.arguments[2]); exit(0) }
+UserDefaults.standard.set(isEN ? ["en"] : ["zh-Hans", "en"], forKey: "AppleLanguages")   // 让系统提供的菜单项(窗口 / Fill 等)与应用语言一致
 let app = NSApplication.shared; let delegate = App()
 app.delegate = delegate; app.setActivationPolicy(.regular); app.run()

@@ -686,7 +686,7 @@ final class ChatPane: NSView, NSTextViewDelegate {
     let edge = NSBox(); edge.boxType = .separator; edge.translatesAutoresizingMaskIntoConstraints = false; addSubview(edge)
     NSLayoutConstraint.activate([edge.leadingAnchor.constraint(equalTo: leadingAnchor), edge.topAnchor.constraint(equalTo: topAnchor), edge.bottomAnchor.constraint(equalTo: bottomAnchor), edge.widthAnchor.constraint(equalToConstant: 1)])
     NSLayoutConstraint.activate([
-      logScroll.topAnchor.constraint(equalTo: topAnchor), logScroll.leadingAnchor.constraint(equalTo: leadingAnchor), logScroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+      logScroll.topAnchor.constraint(equalTo: topAnchor), logScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6), logScroll.trailingAnchor.constraint(equalTo: trailingAnchor),
       logScroll.bottomAnchor.constraint(equalTo: attBar.topAnchor, constant: -6),
       attBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10), attBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
       attBar.bottomAnchor.constraint(equalTo: inScroll.topAnchor, constant: -4),
@@ -811,6 +811,30 @@ final class Settings: NSObject, NSWindowDelegate {
   }
 }
 
+// 聊天栏左缘的拖动条
+final class ResizeHandle: NSView {
+  var onDrag: ((CGFloat) -> Void)?
+  weak var span: NSView?   // 对话显示区:只在它的高度范围内涂色,下方发送区不受影响
+  override func setFrameSize(_ n: NSSize) { super.setFrameSize(n); needsDisplay = true }
+  override func draw(_ dirtyRect: NSRect) {
+    guard let v = span else { return }
+    let r = convert(v.bounds, from: v)
+    NSColor.controlBackgroundColor.setFill(); NSRect(x: 1, y: r.minY, width: max(0, bounds.width - 1), height: r.height).fill()
+  }
+  override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeLeftRight) }
+  override func updateTrackingAreas() {
+    super.updateTrackingAreas(); for a in trackingAreas { removeTrackingArea(a) }
+    addTrackingArea(NSTrackingArea(rect: bounds, options: [.cursorUpdate, .activeAlways, .inVisibleRect], owner: self, userInfo: nil))
+  }
+  override func cursorUpdate(with e: NSEvent) { NSCursor.resizeLeftRight.set() }
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+  override func mouseDown(with e: NSEvent) {}
+  override func mouseDragged(with e: NSEvent) {
+    guard let cw = window?.contentView?.bounds.width else { return }
+    onDrag?(max(220, min(cw - e.locationInWindow.x, cw - 300)))
+  }
+}
+
 // MARK: 拖放:把文件/文件夹拖进窗口即可打开
 final class DropView: NSView {
   override init(frame: NSRect) { super.init(frame: frame); registerForDraggedTypes([.fileURL]) }
@@ -867,10 +891,10 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
   let scroll = makeScroll()
   let status = NSTextField(labelWithString: "")
   let split = NSSplitView(), area = NSView(), side = Sidebar()
-  let encPop = NSPopUpButton(frame: .zero, pullsDown: false)
+  let encPop = NSButton()
   let chatHost = NSView(), chatBtn = RoundButton()
   var chat: ChatPane?
-  var trailFull: NSLayoutConstraint!, trailChat: NSLayoutConstraint!
+  var trailFull: NSLayoutConstraint!, trailChat: NSLayoutConstraint!, chatW: NSLayoutConstraint!
   var tv: NSTextView { scroll.documentView as! NSTextView }
   var url: URL?, enc = String.Encoding.utf8, bom = false, lang: Lang?, size: CGFloat = 13, wrap = true, eol = "LF"
   var work: DispatchWorkItem?
@@ -887,15 +911,15 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
     setSize(13)
     scroll.hasVerticalRuler = true; scroll.rulersVisible = true; scroll.verticalRulerView = Gutter(scroll, t)
     status.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular); status.textColor = .secondaryLabelColor
-    encPop.addItems(withTitles: encs.map { $0.0 }); encPop.controlSize = .small; encPop.font = .systemFont(ofSize: 11)
-    encPop.bezelStyle = .inline; encPop.target = self; encPop.action = #selector(encChanged)
+    encPop.controlSize = .small; encPop.font = .systemFont(ofSize: 11); encPop.bezelStyle = .inline; encPop.target = self; encPop.action = #selector(encClick)
+    encPop.setContentHuggingPriority(NSLayoutConstraint.Priority(1000), for: .horizontal); encPop.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1000), for: .horizontal)
     let root = DropView(); win.contentView = root
     split.isVertical = true; split.dividerStyle = .thin
     scroll.translatesAutoresizingMaskIntoConstraints = false; area.addSubview(scroll)
     split.addArrangedSubview(side.view); split.addArrangedSubview(area); side.view.isHidden = true; chatHost.isHidden = true
     split.setHoldingPriority(NSLayoutConstraint.Priority(260), forSubviewAt: 0)
     chatBtn.title = ""; chatBtn.isBordered = false; chatBtn.target = self; chatBtn.action = #selector(toggleChat); chatBtn.toolTip = T("AI 协作")
-    trailFull = split.trailingAnchor.constraint(equalTo: root.trailingAnchor); trailChat = split.trailingAnchor.constraint(equalTo: chatHost.leadingAnchor)
+    trailFull = split.trailingAnchor.constraint(equalTo: root.trailingAnchor); trailChat = split.trailingAnchor.constraint(equalTo: chatHost.leadingAnchor); chatW = chatHost.widthAnchor.constraint(equalToConstant: 300)
     for v in [split, status, encPop, chatBtn, chatHost] { v.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(v) }
     NSLayoutConstraint.activate([
       scroll.topAnchor.constraint(equalTo: area.topAnchor), scroll.leadingAnchor.constraint(equalTo: area.leadingAnchor),
@@ -903,7 +927,7 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
       split.topAnchor.constraint(equalTo: root.topAnchor), split.leadingAnchor.constraint(equalTo: root.leadingAnchor),
       trailFull, split.bottomAnchor.constraint(equalTo: encPop.topAnchor, constant: -3),
       chatHost.topAnchor.constraint(equalTo: root.topAnchor), chatHost.bottomAnchor.constraint(equalTo: split.bottomAnchor),
-      chatHost.trailingAnchor.constraint(equalTo: root.trailingAnchor), chatHost.widthAnchor.constraint(equalToConstant: 300),
+      chatHost.trailingAnchor.constraint(equalTo: root.trailingAnchor), chatW,
       encPop.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8), encPop.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -4),
       status.leadingAnchor.constraint(equalTo: encPop.trailingAnchor, constant: 8), status.trailingAnchor.constraint(equalTo: root.trailingAnchor),
       status.centerYAnchor.constraint(equalTo: encPop.centerYAnchor),
@@ -942,20 +966,32 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
         let c = ChatPane(self); c.translatesAutoresizingMaskIntoConstraints = false; chatHost.addSubview(c)
         NSLayoutConstraint.activate([c.topAnchor.constraint(equalTo: chatHost.topAnchor), c.bottomAnchor.constraint(equalTo: chatHost.bottomAnchor),
           c.leadingAnchor.constraint(equalTo: chatHost.leadingAnchor), c.trailingAnchor.constraint(equalTo: chatHost.trailingAnchor)])
+        let h = ResizeHandle(); h.translatesAutoresizingMaskIntoConstraints = false; chatHost.addSubview(h)
+        NSLayoutConstraint.activate([h.leadingAnchor.constraint(equalTo: chatHost.leadingAnchor), h.topAnchor.constraint(equalTo: chatHost.topAnchor),
+          h.bottomAnchor.constraint(equalTo: chatHost.bottomAnchor), h.widthAnchor.constraint(equalToConstant: 6)])
+        h.onDrag = { [weak self] w in self?.chatW.constant = w }; h.span = c.logScroll
         chat = c
       }
-      chatHost.isHidden = false; trailFull.isActive = false; trailChat.isActive = true; win.makeFirstResponder(chat?.input)
+      chatW.constant = 300; chatHost.isHidden = false; trailFull.isActive = false; trailChat.isActive = true; win.makeFirstResponder(chat?.input)
     } else {
       chatHost.isHidden = true; trailChat.isActive = false; trailFull.isActive = true
       if reading { win.makeFirstResponder(web) } else { win.makeFirstResponder(tv) }
     }
   }
   func autoLang() { lang = url.flatMap(detect) ?? sniff(tv.string) }   // 扩展名优先,否则按内容自动识别
-  func syncEnc() { encPop.selectItem(at: encs.firstIndex { $0.1 == enc && $0.2 == bom } ?? 0) }
-  @objc func encChanged() {   // 底栏切换编码 = 转换为该编码(保存时生效)
-    let e = encs[max(0, encPop.indexOfSelectedItem)]
+  func syncEnc() { encPop.title = ((encs.first { $0.1 == enc && $0.2 == bom })?.0 ?? encs[0].0) + " ▾" }
+  @objc func encClick() {   // 只有这个小按钮可点;弹出编码列表
+    let m = NSMenu()
+    for (i, e) in encs.enumerated() {
+      let it = NSMenuItem(title: e.0, action: #selector(encPick(_:)), keyEquivalent: ""); it.target = self; it.tag = i
+      it.state = (e.1 == enc && e.2 == bom) ? .on : .off; m.addItem(it)
+    }
+    m.popUp(positioning: nil, at: NSPoint(x: 0, y: encPop.bounds.maxY + 2), in: encPop)
+  }
+  @objc func encPick(_ i: NSMenuItem) {   // 选择编码 = 转换为该编码(保存时生效)
+    let e = encs[i.tag]
     if tv.string.data(using: e.1, allowLossyConversion: false) == nil {
-      let a = NSAlert(); a.messageText = String(format: T("无法用 %@ 表示当前文本中的部分字符"), e.0); a.runModal(); syncEnc(); return
+      let a = NSAlert(); a.messageText = String(format: T("无法用 %@ 表示当前文本中的部分字符"), e.0); a.runModal(); return
     }
     enc = e.1; bom = e.2; win.isDocumentEdited = true; refresh()
   }

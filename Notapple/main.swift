@@ -514,10 +514,10 @@ final class EditView: NSTextView {
   }
 }
 func makeScroll(_ t: NSTextView = EditView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))) -> NSScrollView {
-  let sv = NSScrollView(); sv.hasVerticalScroller = true; sv.borderType = .noBorder
+  let sv = NSScrollView(frame: t.frame); sv.hasVerticalScroller = true; sv.borderType = .noBorder
   t.minSize = NSSize(width: 0, height: 0); t.maxSize = NSSize(width: 1e7, height: 1e7)
   t.isVerticallyResizable = true; t.isHorizontallyResizable = false; t.autoresizingMask = [.width]
-  t.textContainer?.containerSize = NSSize(width: 600, height: 1e7); t.textContainer?.widthTracksTextView = true
+  t.textContainer?.containerSize = NSSize(width: t.frame.width, height: 1e7); t.textContainer?.widthTracksTextView = true
   sv.documentView = t; return sv
 }
 
@@ -697,6 +697,11 @@ final class ChatPane: NSView, NSTextViewDelegate {
     localize()
   }
   required init?(coder: NSCoder) { fatalError() }
+  override func layout() {
+    super.layout()
+    let pairs: [(NSTextView, NSScrollView)] = [(transcript, logScroll), (input, inScroll)]
+    for (t, sv) in pairs { let w = sv.contentSize.width; if w > 0, abs(t.frame.width - w) > 0.5 { t.setFrameSize(NSSize(width: w, height: t.frame.height)) } }
+  }
   func localize() {
     clearBtn.title = T("清除"); sendBtn.title = busy ? T("发送中…") : T("发送"); newBtn.title = T("新对话"); updAtt()
   }

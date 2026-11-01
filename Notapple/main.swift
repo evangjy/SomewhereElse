@@ -6,6 +6,41 @@ import Security
 var isEN: Bool = UserDefaults.standard.string(forKey: "ui").map { $0 == "en" } ?? !(Locale.preferredLanguages.first ?? "").hasPrefix("zh")
 let enStr: [String: String] = [
   "未命名": "Untitled",
+  "新建…": "New…",
+  "关闭…": "Close…",
+  "显示/隐藏侧边栏": "Show / Hide Sidebar",
+  "还没有打开文件夹": "No folder open",
+  "导出为…": "Export As…",
+  "导出失败": "Export failed",
+  "显示": "Display",
+  "系统": "System",
+  "显示模式": "Appearance",
+  "跟随系统": "Follow System",
+  "正常模式": "Light",
+  "暗黑模式": "Dark",
+  "打开方式": "Open behavior",
+  "替换当前侧边栏的文件夹": "Replace the current folder",
+  "保留当前,在新窗口中打开": "Keep current, open in a new window",
+  "AI 模型": "AI Model",
+  "格式:": "Format:",
+  "吉他谱(只读预览)": "Guitar tab (read-only preview)",
+  "未内置乐谱渲染组件": "Sheet-music renderer not bundled",
+  "构建时没能下载 alphaTab,联网后重新运行 build.sh 即可。": "alphaTab couldn't be downloaded during the build. Run build.sh again when online.",
+  "碎片抵达之处": "Where fragments arrive",
+  "复制": "Copy",
+  "打开": "Open",
+  "新建文件…": "New File…",
+  "新建文件夹…": "New Folder…",
+  "重命名…": "Rename…",
+  "在 Finder 中显示": "Reveal in Finder",
+  "移到废纸篓": "Move to Trash",
+  "新建文件": "New File",
+  "新建文件夹": "New Folder",
+  "重命名": "Rename",
+  "创建": "Create",
+  "新文件.txt": "untitled.txt",
+  "新文件夹": "untitled folder",
+  "已存在同名项目": "An item with that name already exists",
   "语言已切换": "Language Changed",
   "“窗口”等系统菜单需要重启后才会切换语言。": "System menus such as Window switch language after restarting.",
   "立即重启": "Restart Now",
@@ -659,17 +694,127 @@ final class ChatInput: NSTextView {
   override func performDragOperation(_ s: NSDraggingInfo) -> Bool { media(s.draggingPasteboard) ? (pane?.ingest(s.draggingPasteboard) ?? false) : super.performDragOperation(s) }
   override func paste(_ sender: Any?) { if media(.general) { _ = pane?.ingest(.general) } else { super.paste(sender) } }
 }
+// MARK: 聊天内 Markdown 渲染(原生 NSAttributedString,跟随深浅色)
+func fBold(_ f: NSFont) -> NSFont { NSFontManager.shared.convert(f, toHaveTrait: .boldFontMask) }
+func fItalic(_ f: NSFont) -> NSFont { NSFontManager.shared.convert(f, toHaveTrait: .italicFontMask) }
+let inlineRE = try! NSRegularExpression(pattern: #"`([^`]+)`|\*\*(.+?)\*\*|__(.+?)__|~~(.+?)~~|\*([^*\s][^*]*?)\*|\b_([^_]+)_\b|!?\[([^\]]*)\]\(([^)\s]+)[^)]*\)"#)
+func inlineAttr(_ t: String, _ font: NSFont, _ color: NSColor) -> NSMutableAttributedString {
+  let out = NSMutableAttributedString(), ns = t as NSString; var last = 0
+  func plain(_ s: String) { out.append(NSAttributedString(string: s, attributes: [.font: font, .foregroundColor: color])) }
+  for m in inlineRE.matches(in: t, range: NSRange(location: 0, length: ns.length)) {
+    plain(ns.substring(with: NSRange(location: last, length: m.range.location - last)))
+    func g(_ i: Int) -> String? { let r = m.range(at: i); return r.location == NSNotFound ? nil : ns.substring(with: r) }
+    if let c = g(1) {
+      out.append(NSAttributedString(string: c, attributes: [.font: NSFont.monospacedSystemFont(ofSize: font.pointSize - 1, weight: .regular), .foregroundColor: color, .backgroundColor: NSColor.quaternaryLabelColor]))
+    } else if let b = g(2) ?? g(3) { out.append(inlineAttr(b, fBold(font), color)) }
+    else if let d = g(4) { let x = inlineAttr(d, font, color); x.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: NSRange(location: 0, length: x.length)); out.append(x) }
+    else if let i = g(5) ?? g(6) { out.append(inlineAttr(i, fItalic(font), color)) }
+    else if let txt = g(7), let u = g(8) {
+      let img = ns.substring(with: m.range).hasPrefix("!"), x = inlineAttr(img ? "[" + txt + "]" : txt, font, color)
+      if !img, let url = URL(string: u) { x.addAttribute(.link, value: url, range: NSRange(location: 0, length: x.length)) }
+      out.append(x)
+    }
+    last = NSMaxRange(m.range)
+  }
+  plain(ns.substring(from: last)); return out
+}
+func mdAttr(_ src: String) -> NSAttributedString {
+  let out = NSMutableAttributedString()
+  let body = NSFont.systemFont(ofSize: 13), mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+  let L = src.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
+  var i = 0, para: [String] = []
+  func ps(_ first: CGFloat = 0, _ head: CGFloat = 0, _ after: CGFloat = 6) -> NSParagraphStyle {
+    let p = NSMutableParagraphStyle(); p.firstLineHeadIndent = first; p.headIndent = head; p.paragraphSpacing = after; p.lineSpacing = 2; return p
+  }
+  func put(_ a: NSAttributedString, _ s: NSParagraphStyle) {
+    let m = NSMutableAttributedString(attributedString: a); m.append(NSAttributedString(string: "\n", attributes: [.font: body]))
+    m.addAttribute(.paragraphStyle, value: s, range: NSRange(location: 0, length: m.length)); out.append(m)
+  }
+  func block(_ a: NSAttributedString) {   // 多行等宽块:代码 / 表格
+    let m = NSMutableAttributedString(attributedString: a); m.addAttribute(.paragraphStyle, value: ps(6, 6, 0), range: NSRange(location: 0, length: m.length))
+    out.append(m); out.append(NSAttributedString(string: "\n\n", attributes: [.font: NSFont.systemFont(ofSize: 6)]))
+  }
+  func flush() { if !para.isEmpty { put(inlineAttr(para.joined(separator: " "), body, NSColor.labelColor), ps()); para = [] } }
+  while i < L.count {
+    let l = L[i], t = l.trimmingCharacters(in: .whitespaces)
+    if t.hasPrefix("```") || t.hasPrefix("~~~") {
+      flush(); let f = String(t.prefix(3)); var code: [String] = []; i += 1
+      while i < L.count, !L[i].trimmingCharacters(in: .whitespaces).hasPrefix(f) { code.append(L[i]); i += 1 }
+      i += 1
+      block(NSAttributedString(string: code.joined(separator: "\n"), attributes: [.font: mono, .foregroundColor: NSColor.labelColor, .backgroundColor: NSColor.quaternaryLabelColor])); continue
+    }
+    if t.isEmpty { flush(); i += 1; continue }
+    if t.range(of: #"^#{1,6}\s"#, options: .regularExpression) != nil {
+      flush(); let n = t.prefix { $0 == "#" }.count, sz: CGFloat = [17, 15.5, 14, 13, 13, 13][n - 1]
+      put(inlineAttr(String(t.dropFirst(n)).trimmingCharacters(in: .whitespaces), fBold(NSFont.systemFont(ofSize: sz)), NSColor.labelColor), ps(0, 0, 4)); i += 1; continue
+    }
+    if t.range(of: #"^([-*_])([ ]*\1){2,}$"#, options: .regularExpression) != nil {
+      flush(); put(NSAttributedString(string: String(repeating: "─", count: 28), attributes: [.font: body, .foregroundColor: NSColor.tertiaryLabelColor]), ps()); i += 1; continue
+    }
+    if t.contains("|"), i + 1 < L.count, L[i + 1].range(of: #"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$"#, options: .regularExpression) != nil {
+      flush(); var rows = [cells(t)]; i += 2
+      while i < L.count, L[i].contains("|"), !L[i].trimmingCharacters(in: .whitespaces).isEmpty { rows.append(cells(L[i])); i += 1 }
+      let n = rows.map { $0.count }.max() ?? 0
+      let w = (0..<n).map { c in rows.map { c < $0.count ? $0[c].count : 0 }.max() ?? 0 }
+      let txt = NSMutableAttributedString()
+      for (r, row) in rows.enumerated() {
+        let line = (0..<n).map { c in (c < row.count ? row[c] : "").padding(toLength: w[c], withPad: " ", startingAt: 0) }.joined(separator: " │ ")
+        txt.append(NSAttributedString(string: (r > 0 ? "\n" : "") + line, attributes: [.font: r == 0 ? fBold(mono) : mono, .foregroundColor: NSColor.labelColor]))
+      }
+      block(txt); continue
+    }
+    if t.hasPrefix(">") {
+      flush()
+      while i < L.count, L[i].trimmingCharacters(in: .whitespaces).hasPrefix(">") {
+        let q = rx(L[i].trimmingCharacters(in: .whitespaces), #"^>\s?"#, "")
+        let a = NSMutableAttributedString(string: "▎ ", attributes: [.font: body, .foregroundColor: NSColor(calibratedRed: 0.10, green: 0.55, blue: 0.48, alpha: 1)])
+        a.append(inlineAttr(q, body, NSColor.secondaryLabelColor)); put(a, ps(0, 12, 2)); i += 1
+      }
+      continue
+    }
+    let ns = l as NSString
+    if let m = listRE.firstMatch(in: l, range: NSRange(location: 0, length: ns.length)) {
+      flush()
+      let lvl = CGFloat(ns.substring(with: m.range(at: 1)).reduce(0) { $0 + ($1 == "\t" ? 4 : 1) } / 2)
+      let mk = ns.substring(with: m.range(at: 2)); var tx = ns.substring(with: m.range(at: 3))
+      var mark = mk.first!.isNumber ? mk : "•"
+      if tx.hasPrefix("[ ] ") { mark = "☐"; tx.removeFirst(4) } else if tx.lowercased().hasPrefix("[x] ") { mark = "☑"; tx.removeFirst(4) }
+      let first = 4 + lvl * 16, head = first + (mark.count > 1 ? 22 : 14)
+      let a = NSMutableAttributedString(string: mark + " ", attributes: [.font: body, .foregroundColor: NSColor.secondaryLabelColor])
+      a.append(inlineAttr(tx, body, NSColor.labelColor)); put(a, ps(first, head, 2)); i += 1; continue
+    }
+    para.append(String(l.drop { $0 == " " || $0 == "\t" })); i += 1
+  }
+  flush(); return out
+}
+// 「复制」图标:原创线条图标(两张叠放的纸 / 对勾),中性灰,深浅模式都清晰
+func glyph(_ check: Bool) -> NSImage {
+  NSImage(size: NSSize(width: 14, height: 14), flipped: false) { _ in
+    NSColor(calibratedWhite: 0.55, alpha: 1).setStroke()
+    let p = NSBezierPath()
+    if check {
+      p.move(to: NSPoint(x: 2.5, y: 7.5)); p.line(to: NSPoint(x: 5.8, y: 4)); p.line(to: NSPoint(x: 11.5, y: 10.5))
+    } else {
+      p.append(NSBezierPath(roundedRect: NSRect(x: 1.8, y: 4, width: 7.5, height: 8.5), xRadius: 1.8, yRadius: 1.8))
+      p.move(to: NSPoint(x: 4.5, y: 4)); p.line(to: NSPoint(x: 4.5, y: 1.5)); p.line(to: NSPoint(x: 12, y: 1.5)); p.line(to: NSPoint(x: 12, y: 10)); p.line(to: NSPoint(x: 9.3, y: 10))
+    }
+    p.lineWidth = 1.2; p.lineCapStyle = .round; p.lineJoinStyle = .round; p.stroke(); return true
+  }
+}
+let copyIcon = glyph(false), checkIcon = glyph(true)
+
 final class ChatPane: NSView, NSTextViewDelegate {
   weak var doc: Doc?
   let transcript = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 400)), input = ChatInput(frame: NSRect(x: 0, y: 0, width: 300, height: 70))
   var logScroll: NSScrollView!, inScroll: NSScrollView!
   let attLabel = NSTextField(labelWithString: ""), clearBtn = NSButton(), sendBtn = NSButton(), newBtn = NSButton()
   var hist: [Msg] = [], atts: [Attach] = [], busy = false, last = ""
+  var entries: [(who: String, text: String, kind: Int)] = [], copied = -1   // kind: 0 我 / 1 AI(渲染 Markdown + 复制) / 2 提示
 
   init(_ d: Doc) {
     doc = d; super.init(frame: .zero)
     registerForDraggedTypes([.fileURL, .png, .tiff, .string])
-    transcript.isEditable = false; transcript.unregisterDraggedTypes(); transcript.textContainerInset = NSSize(width: 8, height: 8)
+    transcript.isEditable = false; transcript.delegate = self; transcript.unregisterDraggedTypes(); transcript.textContainerInset = NSSize(width: 8, height: 8)
     transcript.backgroundColor = .controlBackgroundColor
     input.isRichText = false; input.font = .systemFont(ofSize: 13); input.allowsUndo = true; input.isAutomaticQuoteSubstitutionEnabled = false
     input.textContainerInset = NSSize(width: 4, height: 4); input.delegate = self; input.pane = self
@@ -706,13 +851,36 @@ final class ChatPane: NSView, NSTextViewDelegate {
     clearBtn.title = T("清除"); sendBtn.title = busy ? T("发送中…") : T("发送"); newBtn.title = T("新对话"); updAtt()
   }
   func updAtt() {
-    attLabel.stringValue = atts.isEmpty ? T("拖入文字、图片或文件到这里") : String(format: T("附件(%ld):%@"), atts.count, atts.map { $0.name }.joined(separator: ", "))
+    attLabel.stringValue = atts.isEmpty ? T("碎片抵达之处") : String(format: T("附件(%ld):%@"), atts.count, atts.map { $0.name }.joined(separator: ", "))
     clearBtn.isHidden = atts.isEmpty
   }
-  func add(_ who: String, _ text: String) {
-    let a = NSMutableAttributedString(string: who + "\n", attributes: [.font: NSFont.boldSystemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
-    a.append(NSAttributedString(string: text + "\n\n", attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.labelColor]))
-    transcript.textStorage?.append(a); transcript.scrollToEndOfDocument(nil)
+  func add(_ who: String, _ text: String, kind: Int = 2) { entries.append((who, text, kind)); render(scroll: true) }
+  func render(scroll: Bool) {
+    let off = logScroll.contentView.bounds.origin, out = NSMutableAttributedString()
+    for (i, e) in entries.enumerated() {
+      out.append(NSAttributedString(string: e.who + "\n", attributes: [.font: NSFont.boldSystemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
+      if e.kind == 1 {
+        out.append(mdAttr(e.text))
+        let att = NSTextAttachment(); att.image = copied == i ? checkIcon : copyIcon; att.bounds = CGRect(x: 0, y: -3, width: 14, height: 14)   // 回复下方左侧的复制图标
+        let m = NSMutableAttributedString(attachment: att)
+        m.addAttributes([.link: URL(string: "notapple-copy://\(i)")!, .toolTip: T("复制")], range: NSRange(location: 0, length: m.length))
+        out.append(m); out.append(NSAttributedString(string: "\n"))
+      } else {
+        out.append(NSAttributedString(string: e.text + "\n", attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.labelColor]))
+      }
+      out.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 8)]))
+    }
+    transcript.textStorage?.setAttributedString(out)
+    if scroll { transcript.scrollToEndOfDocument(nil) } else { logScroll.contentView.scroll(to: off); logScroll.reflectScrolledClipView(logScroll.contentView) }
+  }
+  func textView(_ t: NSTextView, clickedOnLink link: Any, at i: Int) -> Bool {
+    guard t === transcript, let u = link as? URL else { return false }
+    if u.scheme == "notapple-copy", let k = Int(u.host ?? ""), k < entries.count {   // 复制未渲染的 Markdown 原文
+      NSPasteboard.general.clearContents(); NSPasteboard.general.setString(entries[k].text, forType: .string)
+      copied = k; render(scroll: false)
+      DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in if self?.copied == k { self?.copied = -1; self?.render(scroll: false) } }
+    } else if ["http", "https", "mailto"].contains(u.scheme ?? "") { NSWorkspace.shared.open(u) }
+    return true
   }
   @discardableResult func ingest(_ pb: NSPasteboard) -> Bool {   // 拖入/粘贴:文件→附件,图片→附件,文字→输入框
     if let us = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !us.isEmpty {
@@ -726,22 +894,22 @@ final class ChatPane: NSView, NSTextViewDelegate {
   override func draggingEntered(_ s: NSDraggingInfo) -> NSDragOperation { .copy }
   override func performDragOperation(_ s: NSDraggingInfo) -> Bool { ingest(s.draggingPasteboard) }
   func textView(_ t: NSTextView, doCommandBy sel: Selector) -> Bool {   // Enter 发送,Shift+Enter 换行
-    guard sel == #selector(NSResponder.insertNewline(_:)), !(NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false) else { return false }
+    guard t === input, sel == #selector(NSResponder.insertNewline(_:)), !(NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false) else { return false }
     send(); return true
   }
   @objc func clearAtts() { atts = []; updAtt() }
-  @objc func newChat() { hist = []; atts = []; transcript.string = ""; updAtt() }
+  @objc func newChat() { hist = []; atts = []; entries = []; copied = -1; render(scroll: true); updAtt() }
   @objc func send() {
     let q = input.string.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !busy, !q.isEmpty || !atts.isEmpty else { return }
     let m = Msg(role: "user", text: q, files: atts); hist.append(m)
-    add(T("我") + (atts.isEmpty ? "" : "  [" + atts.map { $0.name }.joined(separator: ", ") + "]"), q.isEmpty ? "—" : q)
+    add(T("我") + (atts.isEmpty ? "" : "  [" + atts.map { $0.name }.joined(separator: ", ") + "]"), q.isEmpty ? "—" : q, kind: 0)
     input.string = ""; atts = []; busy = true; localize()
     let sys = T("你是嵌入在文本编辑器 Notapple 中的 AI 协作助手,回答简洁、可直接用于文档。")
     AI.ask(hist, system: sys) { [weak self] ok, r in
       guard let s = self else { return }
       s.busy = false
-      if ok { s.hist.append(Msg(role: "assistant", text: r, files: [])); s.last = r; s.add("AI", r) }
+      if ok { s.hist.append(Msg(role: "assistant", text: r, files: [])); s.last = r; s.add("AI", r, kind: 1) }
       else { s.hist.removeLast(); s.input.string = q; s.atts = m.files; s.add("Notapple", r) }
       s.localize()
     }
@@ -749,46 +917,68 @@ final class ChatPane: NSView, NSTextViewDelegate {
 }
 final class Settings: NSObject, NSWindowDelegate {
   static let shared = Settings()
-  var win: NSWindow?
-  let lang = NSPopUpButton(frame: .zero, pullsDown: false), prov = NSPopUpButton(frame: .zero, pullsDown: false)
+  var win: NSWindow?, tabs: NSTabView?, tabIndex = 0
+  let lang = NSPopUpButton(frame: .zero, pullsDown: false), appear = NSPopUpButton(frame: .zero, pullsDown: false)
+  let openMode = NSPopUpButton(frame: .zero, pullsDown: false), prov = NSPopUpButton(frame: .zero, pullsDown: false)
   let base = NSTextField(), model = NSTextField(), key = NSSecureTextField()
   override init() {
     super.init()
-    for v in [lang, prov, base, model, key] as [NSView] { v.widthAnchor.constraint(equalToConstant: 280).isActive = true }
+    for v in [lang, appear, openMode, prov, base, model, key] as [NSView] { v.widthAnchor.constraint(equalToConstant: 280).isActive = true }
     prov.target = self; prov.action = #selector(provChanged)
   }
   func row(_ t: String, _ v: NSView) -> NSStackView {
-    let l = NSTextField(labelWithString: t); l.alignment = .right; l.widthAnchor.constraint(equalToConstant: 96).isActive = true
+    let l = NSTextField(labelWithString: t); l.alignment = .right; l.widthAnchor.constraint(equalToConstant: 110).isActive = true
     let s = NSStackView(views: [l, v]); s.spacing = 10; return s
+  }
+  func section(_ t: String) -> NSTextField { let l = NSTextField(labelWithString: t); l.font = .boldSystemFont(ofSize: 12); l.textColor = .secondaryLabelColor; return l }
+  func note(_ t: String) -> NSTextField {
+    let n = NSTextField(wrappingLabelWithString: t); n.font = .systemFont(ofSize: 11); n.textColor = .secondaryLabelColor; n.preferredMaxLayoutWidth = 400; return n
+  }
+  func line() -> NSBox { let b = NSBox(); b.boxType = .separator; b.widthAnchor.constraint(equalToConstant: 400).isActive = true; return b }
+  func pane(_ vs: [NSView]) -> NSStackView {
+    let st = NSStackView(views: vs); st.orientation = .vertical; st.alignment = .leading; st.spacing = 12
+    st.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16); return st
   }
   func show() { build(); win?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
   func build() {
     let d = UserDefaults.standard, p = d.integer(forKey: "ai.provider")
+    if let t = tabs, let s = t.selectedTabViewItem { tabIndex = t.indexOfTabViewItem(s) }
     if win == nil {
-      let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 300), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+      let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 360), styleMask: [.titled, .closable], backing: .buffered, defer: false)
       w.isReleasedWhenClosed = false; w.delegate = self; w.isExcludedFromWindowsMenu = true; w.center(); win = w
     }
     win?.title = T("设置")
+    // 显示
     lang.removeAllItems(); lang.addItems(withTitles: ["中文", "English"]); lang.selectItem(at: isEN ? 1 : 0)
+    appear.removeAllItems(); appear.addItems(withTitles: [T("跟随系统"), T("正常模式"), T("暗黑模式")]); appear.selectItem(at: d.integer(forKey: "ui.appearance"))
+    // 系统:打开方式 + AI
+    openMode.removeAllItems(); openMode.addItems(withTitles: [T("替换当前侧边栏的文件夹"), T("保留当前,在新窗口中打开")]); openMode.selectItem(at: d.integer(forKey: "open.mode"))
     prov.removeAllItems(); prov.addItems(withTitles: ["Anthropic (Claude)", T("OpenAI 兼容")]); prov.selectItem(at: p)
     base.stringValue = d.string(forKey: "ai.base") ?? AI.defs[p].0; model.stringValue = d.string(forKey: "ai.model") ?? AI.defs[p].1; key.stringValue = Keychain.get() ?? ""
-    let sep = NSBox(); sep.boxType = .separator; sep.widthAnchor.constraint(equalToConstant: 390).isActive = true
-    let note = NSTextField(wrappingLabelWithString: T("API 密钥保存在系统钥匙串中,仅用于调用你配置的接口。") + "\n" + T("部分系统菜单项(如“窗口”)的语言需重启后切换。")); note.font = .systemFont(ofSize: 11); note.textColor = .secondaryLabelColor
-    note.preferredMaxLayoutWidth = 390
+    let display = pane([row(T("界面语言"), lang), row(T("显示模式"), appear), note(T("部分系统菜单项(如“窗口”)的语言需重启后切换。"))])
+    let system = pane([section(T("打开…")), row(T("打开方式"), openMode), line(), section(T("AI 模型")), row(T("接口类型"), prov), row(T("接口地址"), base),
+                       row(T("模型名称"), model), row(T("API 密钥"), key), note(T("API 密钥保存在系统钥匙串中,仅用于调用你配置的接口。"))])
+    let tv = NSTabView(); tabs = tv
+    for (title, v) in [(T("显示"), display), (T("系统"), system)] { let it = NSTabViewItem(identifier: title); it.label = title; it.view = v; tv.addTabViewItem(it) }
+    tv.selectTabViewItem(at: min(tabIndex, 1))
+    let h = max(display.fittingSize.height, system.fittingSize.height) + 44
+    tv.widthAnchor.constraint(equalToConstant: 460).isActive = true; tv.heightAnchor.constraint(equalToConstant: h).isActive = true
     let cancel = NSButton(title: T("取消"), target: self, action: #selector(cancelTap)), apply = NSButton(title: T("应用"), target: self, action: #selector(applyTap)), ok = NSButton(title: T("确定"), target: self, action: #selector(okTap))
     cancel.keyEquivalent = "\u{1b}"; ok.keyEquivalent = "\r"
     let sp = NSView(); sp.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-    let bar = NSStackView(views: [sp, cancel, apply, ok]); bar.widthAnchor.constraint(equalToConstant: 390).isActive = true
-    let st = NSStackView(views: [row(T("界面语言"), lang), sep, row(T("接口类型"), prov), row(T("接口地址"), base), row(T("模型名称"), model), row(T("API 密钥"), key), note, bar])
-    st.orientation = .vertical; st.alignment = .leading; st.spacing = 12; st.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
+    let bar = NSStackView(views: [sp, cancel, apply, ok]); bar.widthAnchor.constraint(equalToConstant: 460).isActive = true
+    let st = NSStackView(views: [tv, bar]); st.orientation = .vertical; st.alignment = .leading; st.spacing = 12
+    st.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
     win?.contentView = st; win?.setContentSize(st.fittingSize)
   }
   func save() {
     let d = UserDefaults.standard
     d.set(prov.indexOfSelectedItem, forKey: "ai.provider"); d.set(base.stringValue, forKey: "ai.base"); d.set(model.stringValue, forKey: "ai.model"); Keychain.set(key.stringValue)
+    d.set(appear.indexOfSelectedItem, forKey: "ui.appearance"); d.set(openMode.indexOfSelectedItem, forKey: "open.mode")
   }
-  func commit() {   // 保存全部修改(语言 + AI 配置)
+  func commit() {   // 保存全部修改(语言 / 显示模式 / 打开方式 / AI 配置)
     save()
+    (NSApp.delegate as? App)?.applyAppearance()
     let en = lang.indexOfSelectedItem == 1
     let changed = en != isEN
     if changed { (NSApp.delegate as? App)?.applyLang(en) }
@@ -812,7 +1002,6 @@ final class Settings: NSObject, NSWindowDelegate {
     let p = prov.indexOfSelectedItem, o = 1 - p
     if [AI.defs[o].0, ""].contains(base.stringValue) { base.stringValue = AI.defs[p].0 }
     if [AI.defs[o].1, ""].contains(model.stringValue) { model.stringValue = AI.defs[p].1 }
-    save()
   }
 }
 
@@ -851,26 +1040,225 @@ final class DropView: NSView {
   }
 }
 
-// MARK: 文件夹侧边栏
+// MARK: 导出为…(Markdown / 吉他谱 / 图片 / 文本)
+var cutURLs: [URL] = []   // 左侧栏「剪切」的文件,粘贴时执行移动
+final class PopTarget: NSObject { let f: () -> Void; init(_ f: @escaping () -> Void) { self.f = f }; @objc func go() { f() } }
+final class PDFJob: NSObject, WKNavigationDelegate {   // 离屏网页 → 分页 PDF(WebKit 打印管线,直接存盘,不弹打印面板)
+  static var live: [PDFJob] = []
+  let web: WKWebView, host: NSWindow, dest: URL, b64: String?, tmp: URL?, done: (Bool) -> Void
+  var tries = 0
+  init(page: URL, access: URL, dest: URL, gp: String?, tmp: URL?, done: @escaping (Bool) -> Void) {
+    let cfg = WKWebViewConfiguration()
+    if gp != nil { cfg.userContentController.addUserScript(WKUserScript(source: "window.PRINT=true", injectionTime: .atDocumentStart, forMainFrameOnly: true)) }
+    let w = WKWebView(frame: NSRect(x: 0, y: 0, width: 523, height: 770), configuration: cfg)
+    w.appearance = NSAppearance(named: .aqua)   // 导出一律用浅色
+    web = w; host = NSWindow(contentRect: w.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+    self.dest = dest; b64 = gp; self.tmp = tmp; self.done = done
+    super.init()
+    host.contentView = web; host.isReleasedWhenClosed = false; host.alphaValue = 0; host.ignoresMouseEvents = true; host.orderBack(nil)
+    web.navigationDelegate = self; PDFJob.live.append(self)
+    web.loadFileURL(page, allowingReadAccessTo: access)
+  }
+  func webView(_ w: WKWebView, didFinish navigation: WKNavigation!) {
+    if let b = b64 { w.evaluateJavaScript("loadScore('" + b + "')", completionHandler: nil); poll() }
+    else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { self.printNow() } }   // 等图片 / 公式排版完成
+  }
+  func webView(_ w: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { finish(false) }
+  func poll() {   // 乐谱渲染完成后再打印
+    web.evaluateJavaScript("window.__done===true?1:(window.__err===true?-1:0)") { [self] r, _ in
+      tries += 1
+      let v = (r as? Int) ?? 0
+      if v == 1 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.printNow() } }
+      else if v < 0 || tries > 150 { finish(false) }
+      else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.poll() } }
+    }
+  }
+  func printNow() {
+    let info = NSPrintInfo(dictionary: [.jobSavingURL: dest])
+    info.jobDisposition = .save; info.paperSize = NSSize(width: 595, height: 842)
+    info.leftMargin = 36; info.rightMargin = 36; info.topMargin = 40; info.bottomMargin = 40
+    info.horizontalPagination = .fit; info.verticalPagination = .automatic; info.isHorizontallyCentered = false; info.isVerticallyCentered = false
+    let op = web.printOperation(with: info)
+    op.showsPrintPanel = false; op.showsProgressPanel = false
+    op.view?.frame = NSRect(x: 0, y: 0, width: 523, height: 762)
+    op.runModal(for: host, delegate: self, didRun: #selector(printed(_:success:contextInfo:)), contextInfo: nil)
+  }
+  @objc func printed(_ op: NSPrintOperation, success: Bool, contextInfo: UnsafeMutableRawPointer?) { finish(success && FileManager.default.fileExists(atPath: dest.path)) }
+  func finish(_ ok: Bool) {
+    host.close(); if let t = tmp { try? FileManager.default.removeItem(at: t) }
+    PDFJob.live.removeAll { $0 === self }; done(ok)
+  }
+}
+enum Export {
+  static let gpExts: Set<String> = ["gp", "gpx", "gp5", "gp4", "gp3"]
+  static func fmts(_ ext: String, text: Bool) -> [(String, String)] {   // (显示名, 扩展名) —— 只列常见、有用的转换
+    let e = ext.lowercased()
+    if e == "md" || e == "markdown" { return [("PDF", "pdf"), ("HTML", "html")] }
+    if gpExts.contains(e) { return [("PDF", "pdf")] }
+    if imgExts.contains(e) && e != "svg" { return [("PNG", "png"), ("JPEG", "jpg"), ("PDF", "pdf")].filter { $0.1 != (e == "jpeg" ? "jpg" : e) } }
+    return e == "pdf" || e == "svg" || !text ? [] : [("PDF", "pdf")]
+  }
+  static func looksText(_ u: URL) -> Bool {
+    guard let h = try? FileHandle(forReadingFrom: u), let d = try? h.read(upToCount: 4096) else { return false }
+    try? h.close(); return !d.contains(0)
+  }
+  static func readText(_ url: URL?, _ text: String?) -> String? {
+    if let t = text { return t }
+    guard let u = url, let d = try? Data(contentsOf: u) else { return nil }
+    return decode(d)?.0
+  }
+  static func start(url: URL?, text: String?, ext: String, name: String) {   // 弹出保存面板:选格式 + 选位置(默认原文件所在目录)
+    let f = fmts(ext, text: text != nil || (url.map { looksText($0) } ?? false)); guard !f.isEmpty else { NSSound.beep(); return }
+    let p = NSSavePanel(); p.title = T("导出为…"); p.canCreateDirectories = true
+    p.directoryURL = url?.deletingLastPathComponent() ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+    let pop = NSPopUpButton(frame: .zero, pullsDown: false); pop.addItems(withTitles: f.map { $0.0 })
+    func setExt() { let e = f[max(0, pop.indexOfSelectedItem)].1; p.allowedFileTypes = [e]; p.nameFieldStringValue = (p.nameFieldStringValue as NSString).deletingPathExtension + "." + e }
+    let tgt = PopTarget(setExt); pop.target = tgt; pop.action = #selector(PopTarget.go)
+    p.nameFieldStringValue = name; setExt()
+    let box = NSStackView(views: [NSTextField(labelWithString: T("格式:")), pop]); box.spacing = 8
+    box.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12); box.setFrameSize(box.fittingSize); p.accessoryView = box
+    guard p.runModal() == .OK, var dest = p.url else { return }
+    let e = f[max(0, pop.indexOfSelectedItem)].1; if dest.pathExtension.lowercased() != e { dest.appendPathExtension(e) }
+    run(url: url, text: text, ext: ext, fmt: e, dest: dest)
+  }
+  static func run(url: URL?, text: String?, ext: String, fmt: String, dest: URL) {
+    let e = ext.lowercased()
+    func finish(_ ok: Bool) {   // 成功后刷新左侧栏并选中导出的文件
+      DispatchQueue.main.async {
+        if ok { NotificationCenter.default.post(name: Sidebar.changed, object: nil); docs.forEach { $0.side.reveal(dest) } }
+        else { let a = NSAlert(); a.messageText = T("导出失败"); a.runModal() }
+      }
+    }
+    if imgExts.contains(e) && e != "svg" {   // 图片:PNG / JPEG / PDF
+      guard let u = url, let img = NSImage(contentsOf: u) else { return finish(false) }
+      if fmt == "pdf" { let d = PDFDocument(); if let pg = PDFPage(image: img) { d.insert(pg, at: 0) }; return finish(d.write(to: dest)) }
+      let props: [NSBitmapImageRep.PropertyKey: Any] = fmt == "png" ? [:] : [.compressionFactor: 0.92]
+      guard let t = img.tiffRepresentation, let rep = NSBitmapImageRep(data: t), let out = rep.representation(using: fmt == "png" ? .png : .jpeg, properties: props) else { return finish(false) }
+      return finish((try? out.write(to: dest)) != nil)
+    }
+    if gpExts.contains(e) {   // 吉他谱 → PDF(全部声部)
+      guard let u = url, let d = try? Data(contentsOf: u), let page = Bundle.main.url(forResource: "viewer", withExtension: "html", subdirectory: "alphatab") else { return finish(false) }
+      _ = PDFJob(page: page, access: page.deletingLastPathComponent(), dest: dest, gp: d.base64EncodedString(), tmp: nil, done: finish); return
+    }
+    guard let t = readText(url, text) else { return finish(false) }
+    let md = e == "md" || e == "markdown"
+    if fmt == "html" { return finish((try? mdPage(t, nil).write(to: dest, atomically: true, encoding: .utf8)) != nil) }
+    let html = md
+      ? mdPage(t, url).replacingOccurrences(of: "<meta name=color-scheme content=\"light dark\">", with: "")
+          .replacingOccurrences(of: "</style>", with: "body{max-width:none;padding:0}pre,table,img,blockquote,.math,h1,h2,h3,h4{break-inside:avoid}</style>")
+      : "<!doctype html><meta charset=utf-8><style>body{margin:0}pre{font:10.5px/1.55 Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere}</style><pre>" + esc(t) + "</pre>"
+    let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("notapple-export-" + UUID().uuidString + ".html")
+    guard (try? html.write(to: tmp, atomically: true, encoding: .utf8)) != nil else { return finish(false) }
+    _ = PDFJob(page: tmp, access: URL(fileURLWithPath: "/"), dest: dest, gp: nil, tmp: tmp, done: finish)
+  }
+}
+
+// MARK: 文件夹侧边栏(右键菜单 / 拖入文件移动到文件夹)
+func ask(_ title: String, _ initial: String, _ ok: String) -> String? {
+  let a = NSAlert(); a.messageText = title
+  let f = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24)); f.stringValue = initial; a.accessoryView = f
+  a.addButton(withTitle: ok); a.addButton(withTitle: T("取消")); a.window.initialFirstResponder = f
+  guard a.runModal() == .alertFirstButtonReturn else { return nil }
+  let v = f.stringValue.trimmingCharacters(in: .whitespacesAndNewlines); return v.isEmpty || v.contains("/") ? nil : v
+}
+func uniqueURL(_ u: URL) -> URL {
+  var t = u, k = 2; let fm = FileManager.default
+  let base = u.deletingPathExtension().lastPathComponent, ext = u.pathExtension, dir = u.deletingLastPathComponent()
+  while fm.fileExists(atPath: t.path) { t = dir.appendingPathComponent(base + " \(k)" + (ext.isEmpty ? "" : "." + ext)); k += 1 }
+  return t
+}
+func fixDocs(_ old: URL, _ new: URL) {   // 重命名/移动后,同步已打开的标签页
+  for d in docs where d.url?.standardizedFileURL == old.standardizedFileURL { d.url = new; d.win.representedURL = new; d.win.title = new.lastPathComponent }
+}
 final class Node {
   let url: URL, isDir: Bool
+  weak var parent: Node?
+  var cache: [Node]?
   init(_ u: URL) { url = u; isDir = (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-  lazy var kids: [Node] = {
+  var kids: [Node] { if let c = cache { return c }; let k = load([]); cache = k; return k }
+  func node(_ x: URL, _ old: [Node]) -> Node { if let n = old.first(where: { $0.url == x }) { return n }; let n = Node(x); n.parent = self; return n }
+  func load(_ old: [Node]) -> [Node] {
     let u = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles)) ?? []
-    return u.map { Node($0) }.sorted { $0.isDir != $1.isDir ? $0.isDir : $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending }
-  }()
+    return u.map { node($0, old) }.sorted { $0.isDir != $1.isDir ? $0.isDir : $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending }
+  }
+  func reload() { guard let old = cache else { return }; let k = load(old); cache = k; k.forEach { $0.reload() } }
+}
+final class SideOutline: NSOutlineView {
+  weak var side: Sidebar?
+  override func menu(for e: NSEvent) -> NSMenu? {
+    let r = row(at: convert(e.locationInWindow, from: nil))
+    if r >= 0 { selectRowIndexes([r], byExtendingSelection: false) } else { deselectAll(nil) }
+    return side?.contextMenu(r >= 0 ? item(atRow: r) as? Node : nil)
+  }
+}
+final class SideToggle: NSButton {   // 底栏最左的「显示 / 隐藏侧边栏」按钮
+  var on = false { didSet { needsDisplay = true } }
+  var hover = false { didSet { needsDisplay = true } }
+  override func updateTrackingAreas() {
+    super.updateTrackingAreas(); for a in trackingAreas { removeTrackingArea(a) }
+    addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self, userInfo: nil))
+  }
+  override func mouseEntered(with e: NSEvent) { hover = true }
+  override func mouseExited(with e: NSEvent) { hover = false }
+  override func draw(_ dirtyRect: NSRect) {
+    if hover { NSColor.labelColor.withAlphaComponent(0.09).setFill(); NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6).fill() }
+    let teal = NSColor(calibratedRed: 0.14, green: 0.62, blue: 0.54, alpha: 1), ink = on ? teal : NSColor.secondaryLabelColor
+    let b = NSRect(x: bounds.midX - 9, y: bounds.midY - 6.5, width: 18, height: 13), paneW = b.width * 0.38
+    let box = NSBezierPath(roundedRect: b, xRadius: 3, yRadius: 3)
+    NSGraphicsContext.saveGraphicsState(); box.addClip()
+    (on ? teal.withAlphaComponent(0.9) : NSColor.secondaryLabelColor.withAlphaComponent(0.16)).setFill()
+    NSBezierPath(rect: NSRect(x: b.minX, y: b.minY, width: paneW, height: b.height)).fill()
+    NSGraphicsContext.restoreGraphicsState()
+    ink.setStroke(); box.lineWidth = 1.3; box.stroke()
+    let d = NSBezierPath(); d.move(to: NSPoint(x: b.minX + paneW, y: b.minY)); d.line(to: NSPoint(x: b.minX + paneW, y: b.maxY)); d.lineWidth = 1.3; d.stroke()
+  }
+}
+final class SideHeader: NSView {   // 侧栏顶部:根文件夹名(自绘文件夹图标 + 半粗体名称 + 底部细线),比下面的条目更醒目一点
+  var name = "" { didSet { needsDisplay = true } }
+  weak var side: Sidebar?
+  override func menu(for event: NSEvent) -> NSMenu? { side?.contextMenu(nil) }
+  override func draw(_ dirtyRect: NSRect) {
+    let ink = NSColor(calibratedRed: 0.14, green: 0.62, blue: 0.54, alpha: 1), x: CGFloat = 14, y = bounds.midY - 6
+    ink.withAlphaComponent(0.55).setFill(); NSBezierPath(roundedRect: NSRect(x: x, y: y + 9, width: 7, height: 4), xRadius: 1.5, yRadius: 1.5).fill()
+    ink.setFill(); NSBezierPath(roundedRect: NSRect(x: x, y: y, width: 16, height: 11), xRadius: 2.5, yRadius: 2.5).fill()
+    let ps = NSMutableParagraphStyle(); ps.lineBreakMode = .byTruncatingMiddle
+    let a: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13, weight: .semibold), .foregroundColor: NSColor.labelColor, .paragraphStyle: ps]
+    let h = (name as NSString).size(withAttributes: a).height
+    (name as NSString).draw(in: NSRect(x: x + 24, y: bounds.midY - h / 2, width: max(0, bounds.width - x - 36), height: h), withAttributes: a)
+    NSColor.separatorColor.setFill(); NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
+  }
 }
 final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
-  let view = NSScrollView(), ov = NSOutlineView()
-  var top: [Node] = []
-  var root: URL? { didSet { top = root.map { Node($0).kids } ?? []; ov.reloadData() } }
+  static let changed = Notification.Name("notapple.fs")
+  let view = NSVisualEffectView(), scroll = NSScrollView(), header = SideHeader(), ov = SideOutline()
+  let empty = NSStackView(), emptyLabel = NSTextField(labelWithString: ""), emptyBtn = NSButton()
+  var top: [Node] = [], rootNode: Node?
+  var root: URL? { didSet { rootNode = root.map { Node($0) }; top = rootNode?.kids ?? []; ov.reloadData(); header.name = root?.lastPathComponent ?? ""; header.toolTip = root?.path; header.isHidden = root == nil; empty.isHidden = root != nil } }
   override init() {
-    super.init()
+    super.init(); ov.side = self
     let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("n")); ov.addTableColumn(c); ov.outlineTableColumn = c
     ov.headerView = nil; ov.style = .sourceList; ov.dataSource = self; ov.delegate = self; ov.target = self; ov.doubleAction = #selector(dbl)
-    ov.setDraggingSourceOperationMask(.copy, forLocal: true); ov.setDraggingSourceOperationMask(.copy, forLocal: false)
-    view.documentView = ov; view.hasVerticalScroller = true
+    ov.registerForDraggedTypes([.fileURL])
+    ov.setDraggingSourceOperationMask([.copy, .move], forLocal: true); ov.setDraggingSourceOperationMask(.copy, forLocal: false)
+    ov.backgroundColor = .clear; scroll.documentView = ov; scroll.hasVerticalScroller = true; scroll.drawsBackground = false
+    view.material = .sidebar; view.blendingMode = .behindWindow; view.state = .followsWindowActiveState; header.side = self
+    for v in [header, scroll] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(v) }
+    NSLayoutConstraint.activate([header.topAnchor.constraint(equalTo: view.topAnchor), header.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      header.trailingAnchor.constraint(equalTo: view.trailingAnchor), header.heightAnchor.constraint(equalToConstant: 34),
+      scroll.topAnchor.constraint(equalTo: header.bottomAnchor), scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor), scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor)])
+    emptyLabel.font = .systemFont(ofSize: 12); emptyLabel.textColor = .secondaryLabelColor
+    emptyBtn.bezelStyle = .rounded; emptyBtn.controlSize = .small; emptyBtn.target = self; emptyBtn.action = #selector(emptyOpen)
+    empty.orientation = .vertical; empty.spacing = 10; empty.addArrangedSubview(emptyLabel); empty.addArrangedSubview(emptyBtn)
+    empty.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(empty)
+    NSLayoutConstraint.activate([empty.centerXAnchor.constraint(equalTo: view.centerXAnchor), empty.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: 10)])
+    header.isHidden = true; localize()
+    NotificationCenter.default.addObserver(self, selector: #selector(reloadTree), name: Sidebar.changed, object: nil)
   }
+  func localize() { emptyLabel.stringValue = T("还没有打开文件夹"); emptyBtn.title = T("打开…") }
+  @objc func emptyOpen() { (NSApp.delegate as? App)?.openDlg() }
+  @objc func reloadTree() { rootNode?.reload(); top = rootNode?.kids ?? []; ov.reloadData() }
+  func changed() { NotificationCenter.default.post(name: Sidebar.changed, object: nil) }
   func outlineView(_ o: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int { item == nil ? top.count : (item as! Node).kids.count }
   func outlineView(_ o: NSOutlineView, child index: Int, ofItem item: Any?) -> Any { item == nil ? top[index] : (item as! Node).kids[index] }
   func outlineView(_ o: NSOutlineView, isItemExpandable item: Any) -> Bool { (item as! Node).isDir }
@@ -879,15 +1267,130 @@ final class Sidebar: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
     t.lineBreakMode = .byTruncatingMiddle; t.font = .systemFont(ofSize: 12, weight: n.isDir ? .semibold : .regular); return t
   }
   func outlineView(_ o: NSOutlineView, pasteboardWriterForItem item: Any) -> NSPasteboardWriting? { (item as! Node).url as NSURL }
+  // 拖入:落在文件夹行 = 放进该文件夹;落在文件行/空白 = 放进所在文件夹/根文件夹
+  func outlineView(_ o: NSOutlineView, validateDrop info: NSDraggingInfo, proposedItem item: Any?, proposedChildIndex index: Int) -> NSDragOperation {
+    guard root != nil, info.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) else { return [] }
+    var target = item as? Node
+    if let n = target, !n.isDir { target = n.parent === rootNode ? nil : n.parent }
+    o.setDropItem(target, dropChildIndex: -1)   // -1 = 落在该项目本身
+    return info.draggingSourceOperationMask.contains(.move) ? .move : .copy
+  }
+  func outlineView(_ o: NSOutlineView, acceptDrop info: NSDraggingInfo, item: Any?, childIndex index: Int) -> Bool {
+    guard let r = root, let us = info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] else { return false }
+    let dest = ((item as? Node)?.url ?? r).standardizedFileURL, move = info.draggingSourceOperationMask.contains(.move), fm = FileManager.default
+    var ok = false
+    for u in us {
+      let src = u.standardizedFileURL
+      if src.deletingLastPathComponent().path == dest.path { continue }                      // 已经在这个文件夹里
+      if dest.path == src.path || dest.path.hasPrefix(src.path + "/") { continue }          // 不能放进自己里面
+      let t = uniqueURL(dest.appendingPathComponent(src.lastPathComponent))
+      do { if move { try fm.moveItem(at: src, to: t); fixDocs(src, t) } else { try fm.copyItem(at: src, to: t) }; ok = true }
+      catch { NSAlert(error: error).runModal() }
+    }
+    if ok { changed(); if let n = item as? Node { o.expandItem(n) } }
+    return ok
+  }
   @objc func dbl() {
     guard let n = ov.item(atRow: ov.clickedRow) as? Node else { return }
     if n.isDir { ov.isItemExpanded(n) ? ov.collapseItem(n) : ov.expandItem(n) } else { (NSApp.delegate as? App)?.openURL(n.url) }
+  }
+  // 右键菜单(精简):新建 / 重命名 / 在 Finder 中显示 / 移到废纸篓
+  func contextMenu(_ n: Node?) -> NSMenu {
+    let m = NSMenu(); m.autoenablesItems = false
+    func add(_ t: String, _ a: Selector, _ on: Bool = true) { let i = NSMenuItem(title: T(t), action: a, keyEquivalent: ""); i.target = self; i.representedObject = n; i.isEnabled = on; m.addItem(i) }
+    let paste = canPaste
+    if let n = n {
+      if n.isDir { add("新建文件…", #selector(ctxNewFile(_:))); add("新建文件夹…", #selector(ctxNewFolder(_:))) } else { add("打开", #selector(ctxOpen(_:))) }
+      m.addItem(.separator()); add("剪切", #selector(ctxCut(_:))); add("拷贝", #selector(ctxCopy(_:))); if n.isDir { add("粘贴", #selector(ctxPaste(_:)), paste) }
+      if !n.isDir, !Export.fmts(n.url.pathExtension, text: Export.looksText(n.url)).isEmpty { m.addItem(.separator()); add("导出为…", #selector(ctxExport(_:))) }
+      m.addItem(.separator()); add("重命名…", #selector(ctxRename(_:))); add("在 Finder 中显示", #selector(ctxReveal(_:)))
+      m.addItem(.separator()); add("移到废纸篓", #selector(ctxTrash(_:)))
+    } else {
+      add("新建文件…", #selector(ctxNewFile(_:))); add("新建文件夹…", #selector(ctxNewFolder(_:)))
+      m.addItem(.separator()); add("粘贴", #selector(ctxPaste(_:)), paste)   // 剪贴板里没有可粘贴的文件时为灰色
+      m.addItem(.separator()); add("打开…", #selector(ctxOpenDlg(_:))); add("关闭…", #selector(ctxCloseFolder(_:)))
+      m.addItem(.separator()); add("在 Finder 中显示", #selector(ctxReveal(_:)))
+    }
+    return m
+  }
+  func dirOf(_ n: Node?) -> URL? { n.map { $0.url } ?? root }
+  func exists() { let a = NSAlert(); a.messageText = T("已存在同名项目"); a.runModal() }
+  @objc func ctxOpen(_ m: NSMenuItem) { if let n = m.representedObject as? Node { (NSApp.delegate as? App)?.openURL(n.url) } }
+  @objc func ctxNewFile(_ m: NSMenuItem) {
+    guard let d = dirOf(m.representedObject as? Node), let name = ask(T("新建文件"), T("新文件.txt"), T("创建")) else { return }
+    let u = d.appendingPathComponent(name)
+    if FileManager.default.fileExists(atPath: u.path) { exists(); return }
+    guard (try? Data().write(to: u)) != nil else { NSSound.beep(); return }
+    changed(); if let n = m.representedObject as? Node { ov.expandItem(n) }; (NSApp.delegate as? App)?.openURL(u)
+  }
+  @objc func ctxNewFolder(_ m: NSMenuItem) {
+    guard let d = dirOf(m.representedObject as? Node), let name = ask(T("新建文件夹"), T("新文件夹"), T("创建")) else { return }
+    let u = d.appendingPathComponent(name)
+    if FileManager.default.fileExists(atPath: u.path) { exists(); return }
+    do { try FileManager.default.createDirectory(at: u, withIntermediateDirectories: false); changed(); if let n = m.representedObject as? Node { ov.expandItem(n) } }
+    catch { NSAlert(error: error).runModal() }
+  }
+  @objc func ctxRename(_ m: NSMenuItem) {
+    guard let n = m.representedObject as? Node, let name = ask(T("重命名"), n.url.lastPathComponent, T("确定")) else { return }
+    let t = n.url.deletingLastPathComponent().appendingPathComponent(name)
+    if t == n.url { return }
+    if FileManager.default.fileExists(atPath: t.path) { exists(); return }
+    do { try FileManager.default.moveItem(at: n.url, to: t); fixDocs(n.url, t); changed() } catch { NSAlert(error: error).runModal() }
+  }
+  @objc func ctxReveal(_ m: NSMenuItem) {
+    if let n = m.representedObject as? Node { NSWorkspace.shared.activateFileViewerSelecting([n.url]) } else if let r = root { NSWorkspace.shared.open(r) }
+  }
+  @objc func ctxTrash(_ m: NSMenuItem) {
+    guard let n = m.representedObject as? Node else { return }
+    do { try FileManager.default.trashItem(at: n.url, resultingItemURL: nil); changed() } catch { NSAlert(error: error).runModal() }
+  }
+  var canPaste: Bool { root != nil && NSPasteboard.general.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) }
+  func clip(_ m: NSMenuItem, cut: Bool) {   // 拷贝 / 剪切:把文件放进系统剪贴板(与 Finder 互通);剪切另记一份,粘贴时移动
+    guard let n = m.representedObject as? Node else { return }
+    NSPasteboard.general.clearContents(); NSPasteboard.general.writeObjects([n.url as NSURL]); cutURLs = cut ? [n.url] : []
+  }
+  @objc func ctxCopy(_ m: NSMenuItem) { clip(m, cut: false) }
+  @objc func ctxCut(_ m: NSMenuItem) { clip(m, cut: true) }
+  @objc func ctxPaste(_ m: NSMenuItem) {
+    guard let d = dirOf(m.representedObject as? Node)?.standardizedFileURL,
+          let us = NSPasteboard.general.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] else { return }
+    let cut = !cutURLs.isEmpty && Set(cutURLs.map { $0.standardizedFileURL.path }) == Set(us.map { $0.standardizedFileURL.path })
+    if !cut { cutURLs = [] }
+    let fm = FileManager.default; var last: URL?
+    for u in us {
+      let src = u.standardizedFileURL
+      if cut && src.deletingLastPathComponent().path == d.path { continue }                  // 已经在这个文件夹里
+      if d.path == src.path || d.path.hasPrefix(src.path + "/") { continue }                 // 不能放进自己里面
+      let t = uniqueURL(d.appendingPathComponent(src.lastPathComponent))
+      do { if cut { try fm.moveItem(at: src, to: t); fixDocs(src, t) } else { try fm.copyItem(at: src, to: t) }; last = t }
+      catch { NSAlert(error: error).runModal() }
+    }
+    if cut { cutURLs = [] }
+    changed(); if let n = m.representedObject as? Node, n.isDir { ov.expandItem(n) }
+    if let l = last { docs.forEach { $0.side.reveal(l) } }
+  }
+  @objc func ctxExport(_ m: NSMenuItem) {
+    guard let n = m.representedObject as? Node else { return }
+    Export.start(url: n.url, text: nil, ext: n.url.pathExtension, name: n.url.deletingPathExtension().lastPathComponent)
+  }
+  @objc func ctxOpenDlg(_ m: NSMenuItem) { (NSApp.delegate as? App)?.openDlg() }
+  @objc func ctxCloseFolder(_ m: NSMenuItem) { (NSApp.delegate as? App)?.closeFolder() }
+  func reveal(_ u: URL) {   // 展开到并选中某个文件(导出 / 粘贴之后用)
+    guard let r = rootNode else { return }
+    let rp = r.url.standardizedFileURL.path, up = u.standardizedFileURL.path
+    guard up.hasPrefix(rp + "/") else { return }
+    var cur = r
+    for c in up.dropFirst(rp.count + 1).split(separator: "/") {
+      guard let n = cur.kids.first(where: { $0.url.lastPathComponent == String(c) }) else { return }
+      if n.isDir { ov.expandItem(n) }; cur = n
+    }
+    let row = ov.row(forItem: cur); if row >= 0 { ov.selectRowIndexes([row], byExtendingSelection: false); ov.scrollRowToVisible(row) }
   }
 }
 
 // MARK: 文档(每个标签页一个)
 var docs: [Doc] = []
-var folderRoot: URL?
+var pendingFolder: URL?   // 启动时(还没有窗口)收到的文件夹
 var readingMode = false   // 全局阅读模式:⌘. 一次切换所有 Markdown 标签页
 func cur() -> Doc? { docs.first { $0.win == NSApp.mainWindow } ?? docs.last }
 
@@ -899,15 +1402,19 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
   let encPop = NSButton()
   let chatHost = NSView(), chatBtn = RoundButton()
   var chat: ChatPane?
+  var gpB64: String?
+  var sideShown = false, sideBtn = SideToggle()   // 侧边栏是否展开(与是否有文件夹分开)
+  var folder: URL?   // 本窗口(同一组标签页)侧边栏显示的文件夹
   var trailFull: NSLayoutConstraint!, trailChat: NSLayoutConstraint!, chatW: NSLayoutConstraint!
   var tv: NSTextView { scroll.documentView as! NSTextView }
   var url: URL?, enc = String.Encoding.utf8, bom = false, lang: Lang?, size: CGFloat = 13, wrap = true, eol = "LF"
   var work: DispatchWorkItem?
   var reading = false, web: WKWebView?, tmp: URL?
 
-  init(_ u: URL?) {
+  init(_ u: URL?, newWindow: Bool = false) {
     super.init()
-    win.title = T("未命名"); win.tabbingMode = .preferred; win.tabbingIdentifier = "ed"; win.isReleasedWhenClosed = false; win.delegate = self; win.isExcludedFromWindowsMenu = true
+    win.title = T("未命名"); win.tabbingMode = .preferred; win.tabbingIdentifier = newWindow ? "ed-" + UUID().uuidString : (cur()?.win.tabbingIdentifier ?? "ed"); win.isReleasedWhenClosed = false; win.delegate = self; win.isExcludedFromWindowsMenu = true
+    if !newWindow { folder = cur()?.folder ?? (docs.isEmpty ? pendingFolder : nil); sideShown = cur()?.sideShown ?? (folder != nil); if docs.isEmpty { pendingFolder = nil } }
     let t = tv
     t.isRichText = false; t.allowsUndo = true; t.delegate = self; t.textContainerInset = NSSize(width: 4, height: 6)
     t.isAutomaticQuoteSubstitutionEnabled = false; t.isAutomaticDashSubstitutionEnabled = false
@@ -924,8 +1431,9 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
     split.addArrangedSubview(side.view); split.addArrangedSubview(area); side.view.isHidden = true; chatHost.isHidden = true
     split.setHoldingPriority(NSLayoutConstraint.Priority(260), forSubviewAt: 0)
     chatBtn.title = ""; chatBtn.isBordered = false; chatBtn.target = self; chatBtn.action = #selector(toggleChat); chatBtn.toolTip = T("AI 协作")
+    sideBtn.title = ""; sideBtn.isBordered = false; sideBtn.target = self; sideBtn.action = #selector(toggleSide); sideBtn.toolTip = T("显示/隐藏侧边栏")
     trailFull = split.trailingAnchor.constraint(equalTo: root.trailingAnchor); trailChat = split.trailingAnchor.constraint(equalTo: chatHost.leadingAnchor); chatW = chatHost.widthAnchor.constraint(equalToConstant: 300)
-    for v in [split, status, encPop, chatBtn, chatHost] { v.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(v) }
+    for v in [split, status, encPop, chatBtn, chatHost, sideBtn] { v.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(v) }
     NSLayoutConstraint.activate([
       scroll.topAnchor.constraint(equalTo: area.topAnchor), scroll.leadingAnchor.constraint(equalTo: area.leadingAnchor),
       scroll.trailingAnchor.constraint(equalTo: area.trailingAnchor), scroll.bottomAnchor.constraint(equalTo: area.bottomAnchor),
@@ -933,13 +1441,16 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
       trailFull, split.bottomAnchor.constraint(equalTo: encPop.topAnchor, constant: -3),
       chatHost.topAnchor.constraint(equalTo: root.topAnchor), chatHost.bottomAnchor.constraint(equalTo: split.bottomAnchor),
       chatHost.trailingAnchor.constraint(equalTo: root.trailingAnchor), chatW,
-      encPop.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8), encPop.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -4),
+      sideBtn.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8), sideBtn.centerYAnchor.constraint(equalTo: encPop.centerYAnchor),
+      sideBtn.widthAnchor.constraint(equalToConstant: 30), sideBtn.heightAnchor.constraint(equalToConstant: 22), encPop.leadingAnchor.constraint(equalTo: sideBtn.trailingAnchor, constant: 4), encPop.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -4),
       status.leadingAnchor.constraint(equalTo: encPop.trailingAnchor, constant: 8), status.trailingAnchor.constraint(equalTo: root.trailingAnchor),
       status.centerYAnchor.constraint(equalTo: encPop.centerYAnchor),
       chatBtn.widthAnchor.constraint(equalToConstant: 38), chatBtn.heightAnchor.constraint(equalToConstant: 38),
       chatBtn.trailingAnchor.constraint(equalTo: area.trailingAnchor, constant: -24), chatBtn.bottomAnchor.constraint(equalTo: area.bottomAnchor, constant: -16)])
-    docs.append(self)
-    if let k = cur(), k !== self, docs.count > 1 { docs[docs.count - 2].win.addTabbedWindow(win, ordered: .above) }
+    let prev = cur(); docs.append(self)
+    if let k = prev, k !== self {
+      if newWindow { win.setFrameOrigin(NSPoint(x: k.win.frame.minX + 30, y: k.win.frame.minY - 30)) } else { k.win.addTabbedWindow(win, ordered: .above) }
+    }
     win.makeKeyAndOrderFront(nil); updateSidebar()
     if let u = u { load(u) } else { refresh() }
   }
@@ -1000,10 +1511,33 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
     }
     enc = e.1; bom = e.2; win.isDocumentEdited = true; refresh()
   }
+  func showGP(_ d: Data) {   // 吉他谱(.gp .gpx .gp5 等):内置 alphaTab 渲染,只读
+    guard let page = Bundle.main.url(forResource: "viewer", withExtension: "html", subdirectory: "alphatab") else {
+      let a = NSAlert(); a.messageText = T("未内置乐谱渲染组件"); a.informativeText = T("构建时没能下载 alphaTab,联网后重新运行 build.sh 即可。"); a.runModal(); win.close(); return
+    }
+    let w = WKWebView(frame: .zero, configuration: WKWebViewConfiguration()); w.navigationDelegate = self
+    w.translatesAutoresizingMaskIntoConstraints = false; scroll.isHidden = true; encPop.isHidden = true; area.addSubview(w)
+    NSLayoutConstraint.activate([w.topAnchor.constraint(equalTo: area.topAnchor), w.leadingAnchor.constraint(equalTo: area.leadingAnchor),
+      w.trailingAnchor.constraint(equalTo: area.trailingAnchor), w.bottomAnchor.constraint(equalTo: area.bottomAnchor)])
+    w.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent())
+    gpB64 = d.base64EncodedString(); status.stringValue = T("吉他谱(只读预览)")
+  }
+  func webView(_ w: WKWebView, didFinish navigation: WKNavigation!) {
+    guard let b = gpB64 else { return }; gpB64 = nil
+    w.evaluateJavaScript("loadScore('" + b + "')", completionHandler: nil)
+  }
+  func setFolder(_ u: URL?) {   // 同一窗口的所有标签页共用一个文件夹
+    for d in docs where d.win.tabbingIdentifier == win.tabbingIdentifier { d.folder = u; if u != nil { d.sideShown = true }; d.updateSidebar() }
+  }
+  @objc func toggleSide() {   // 显示 / 隐藏侧边栏(同一窗口的所有标签页一起)
+    let v = !sideShown
+    for d in docs where d.win.tabbingIdentifier == win.tabbingIdentifier { d.sideShown = v; d.updateSidebar() }
+  }
   func updateSidebar() {
-    guard let r = folderRoot else { side.view.isHidden = true; split.adjustSubviews(); return }
-    let was = side.view.isHidden; side.root = r; side.view.isHidden = false; split.adjustSubviews()
-    if was { split.setPosition(220, ofDividerAt: 0) }
+    if side.root != folder { side.root = folder }   // 关闭 … 时 folder 为 nil:真正清空侧边栏里的内容
+    let was = side.view.isHidden
+    side.view.isHidden = !sideShown; sideBtn.on = sideShown; split.adjustSubviews()
+    if sideShown && was { split.setPosition(220, ofDividerAt: 0) }
   }
   func setSize(_ s: CGFloat) { size = max(8, min(48, s)); tv.font = .monospacedSystemFont(ofSize: size, weight: .regular); highlight() }
   func setWrap(_ w: Bool) {
@@ -1047,6 +1581,7 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
       status.stringValue = String(format: T("图片  |  %ld × %ld 像素  |  %@"), px.0, px.1, ByteCountFormatter.string(fromByteCount: Int64(d.count), countStyle: .file))
       return
     }
+    if ["gp", "gpx", "gp5", "gp4", "gp3"].contains(u.pathExtension.lowercased()) { showGP(d); return }   // 吉他谱
     guard let (s, e, b) = decode(d) else {
       let a = NSAlert(); a.messageText = String(format: T("无法作为文本打开:%@"), u.lastPathComponent); a.informativeText = T("文件看起来是二进制。"); a.runModal(); win.close(); return
     }
@@ -1215,7 +1750,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVali
   }
   func openItems(_ us: [URL]) {
     for u in us {
-      if (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { folderRoot = u; docs.forEach { $0.updateSidebar() } } else { openURL(u) }
+      if (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { if let d = cur() { d.setFolder(u) } else { pendingFolder = u } } else { openURL(u) }
     }
   }
   func application(_ a: NSApplication, openFiles f: [String]) { openItems(f.map { URL(fileURLWithPath: $0) }); a.reply(toOpenOrPrint: .success) }
@@ -1226,7 +1761,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVali
     return al.runModal() == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
   }
   func applicationDidFinishLaunching(_ n: Notification) {
-    buildMenu(); if docs.isEmpty { _ = Doc(nil) }
+    applyAppearance(); buildMenu(); if docs.isEmpty { _ = Doc(nil) }
   }
   func add(_ m: NSMenu, _ t: String, _ a: Selector?, _ k: String = "", _ mod: NSEvent.ModifierFlags = .command, tag: Int = 0) {
     let i = m.addItem(withTitle: t, action: a, keyEquivalent: k); i.keyEquivalentModifierMask = mod; i.tag = tag
@@ -1238,8 +1773,8 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVali
     NSApp.mainMenu = NSMenu()
     let a = sub("Notapple"); add(a, T("设置…"), #selector(openSettings), ","); a.addItem(.separator()); add(a, T("退出 Notapple"), #selector(NSApplication.terminate(_:)), "q")
     let f = sub(T("文件"))
-    add(f, T("新建标签页"), #selector(newDoc), "n"); add(f, T("打开…"), #selector(openDlg), "o"); add(f, T("关闭文件夹"), #selector(closeFolder))
-    add(f, T("保存"), #selector(save), "s"); add(f, T("另存为…"), #selector(saveAs), "s", [.command, .shift]); add(f, T("关闭标签页"), #selector(NSWindow.performClose(_:)), "w")
+    add(f, T("新建…"), #selector(newDoc), "n"); add(f, T("打开…"), #selector(openDlg), "o"); add(f, T("关闭…"), #selector(closeFolder))
+    add(f, T("保存"), #selector(save), "s"); add(f, T("另存为…"), #selector(saveAs), "s", [.command, .shift]); add(f, T("导出为…"), #selector(exportCmd), "e", [.command, .shift]); add(f, T("关闭标签页"), #selector(NSWindow.performClose(_:)), "w")
     let e = sub(T("编辑"))
     add(e, T("撤销"), #selector(undoCmd), "z"); add(e, T("重做"), #selector(redoCmd), "z", [.command, .shift])
     add(e, T("剪切"), #selector(NSText.cut(_:)), "x"); add(e, T("拷贝"), #selector(NSText.copy(_:)), "c")
@@ -1249,7 +1784,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVali
     e.addItem(.separator())
     add(e, T("删除重复行"), #selector(dedupe)); add(e, T("去除行尾空白"), #selector(trim))
     let v = sub(T("视图"))
-    add(v, T("自动换行"), #selector(toggleWrap), "w", [.option]); add(v, T("放大"), #selector(bigger), "+"); add(v, T("缩小"), #selector(smaller), "-"); add(v, T("切换阅读/编辑模式"), #selector(toggleRead), "."); add(v, T("AI 协作"), #selector(toggleAI), "a", [.command, .option])
+    add(v, T("自动换行"), #selector(toggleWrap), "w", [.option]); add(v, T("放大"), #selector(bigger), "+"); add(v, T("缩小"), #selector(smaller), "-"); add(v, T("切换阅读/编辑模式"), #selector(toggleRead), "."); add(v, T("AI 协作"), #selector(toggleAI), "a", [.command, .option]); add(v, T("显示/隐藏侧边栏"), #selector(toggleSideCmd), "s", [.command, .option])
     let w = sub(T("窗口")); w.delegate = self; NSApp.windowsMenu = w   // 仅保留系统提供的 Fill / Center / Move & Resize / Full Screen Tile
   }
   func menuWillOpen(_ m: NSMenu) { prune(m) }
@@ -1261,14 +1796,15 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVali
     while let l = m.items.last, l.isSeparatorItem { m.removeItem(l) }
     var k = 1; while k < m.items.count { if m.items[k].isSeparatorItem && m.items[k - 1].isSeparatorItem { m.removeItem(at: k) } else { k += 1 } }
   }
-  @objc func closeFolder() { folderRoot = nil; docs.forEach { $0.updateSidebar() } }
+  @objc func closeFolder() { cur()?.setFolder(nil) }
   func applyLang(_ en: Bool) {
     isEN = en; UserDefaults.standard.set(en ? "en" : "zh", forKey: "ui"); UserDefaults.standard.set(en ? ["en"] : ["zh-Hans", "en"], forKey: "AppleLanguages"); buildMenu()
-    for d in docs { if d.url == nil { d.win.title = T("未命名") }; d.refresh(); d.chat?.localize(); d.chatBtn.toolTip = T("AI 协作") }
+    for d in docs { if d.url == nil { d.win.title = T("未命名") }; d.refresh(); d.chat?.localize(); d.chatBtn.toolTip = T("AI 协作"); d.side.localize(); d.sideBtn.toolTip = T("显示/隐藏侧边栏") }
     Finder.shared.localize()
   }
   @objc func openSettings() { Settings.shared.show() }
   @objc func toggleAI() { cur()?.toggleChat() }
+  @objc func toggleSideCmd() { cur()?.toggleSide() }
   func ur() -> UndoManager? { (NSApp.keyWindow?.firstResponder as? NSTextView)?.undoManager }   // 作用于当前输入框(编辑区 / 聊天框 / 设置)
   @objc func undoCmd() { ur()?.undo() }
   @objc func redoCmd() { ur()?.redo() }
@@ -1278,12 +1814,35 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVali
     return true
   }
   @objc func newDoc() { _ = Doc(nil) }
-  @objc func openDlg() {   // 一个入口同时打开文件和文件夹
+  @objc func openDlg() {   // 一个入口同时打开文件和文件夹;行为由 设置 → 系统 → 打开… 决定
     let p = NSOpenPanel(); p.canChooseFiles = true; p.canChooseDirectories = true; p.allowsMultipleSelection = true
-    if p.runModal() == .OK { openItems(p.urls) }
+    guard p.runModal() == .OK else { return }
+    if UserDefaults.standard.integer(forKey: "open.mode") == 1 { p.urls.forEach(openInNewWindow) } else { openItems(p.urls) }
+  }
+  func openInNewWindow(_ u: URL) {   // 保留当前窗口不动,在新窗口里打开
+    if (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+      if let d = docs.first(where: { $0.folder?.standardizedFileURL == u.standardizedFileURL }) { d.win.makeKeyAndOrderFront(nil); return }
+      let d = Doc(nil, newWindow: true); d.setFolder(u)
+    } else {
+      if let d = docs.first(where: { $0.url == u }) { d.win.makeKeyAndOrderFront(nil); return }
+      _ = Doc(u, newWindow: true)
+    }
+  }
+  func applyAppearance() {   // 0 跟随系统 / 1 正常 / 2 暗黑
+    switch UserDefaults.standard.integer(forKey: "ui.appearance") {
+    case 1: NSApp.appearance = NSAppearance(named: .aqua)
+    case 2: NSApp.appearance = NSAppearance(named: .darkAqua)
+    default: NSApp.appearance = nil
+    }
   }
   @objc func save() { cur()?.save(false) }
   @objc func saveAs() { cur()?.save(true) }
+  @objc func exportCmd() {   // 导出当前标签页(Markdown 用当前编辑中的内容)
+    guard let d = cur() else { return }
+    let ext = d.url?.pathExtension ?? (d.lang?.name == "Markdown" ? "md" : "txt")
+    let isText = d.reading || !d.scroll.isHidden
+    Export.start(url: d.url, text: isText ? d.tv.string : nil, ext: ext, name: d.url?.deletingPathExtension().lastPathComponent ?? T("未命名"))
+  }
   @objc func find() { Finder.shared.show() }
   func xf(_ f: (String) -> String) {
     guard let d = cur() else { return }; var r = d.tv.selectedRange(); let s = d.tv.string as NSString

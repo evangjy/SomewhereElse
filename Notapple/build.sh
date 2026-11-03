@@ -17,7 +17,7 @@ if curl -fsSL "https://registry.npmjs.org/@coderline/alphatab/-/alphatab-$AT.tgz
   cat > "$R/viewer.html" <<'V'
 <!doctype html><meta charset="utf-8">
 <style>
-body{margin:0;background:#f2f2f0;color:#222;font:13px -apple-system,"PingFang SC",sans-serif}
+body{margin:0;position:relative;background:#f2f2f0;color:#222;font:13px -apple-system,"PingFang SC",sans-serif}
 #bar{position:sticky;top:0;z-index:5;display:flex;gap:10px;align-items:center;padding:8px 14px;background:#fffe;border-bottom:1px solid #0001}
 #at{background:#fff;margin:14px auto;max-width:1100px;padding:10px 20px 30px;box-shadow:0 1px 6px #0002;border-radius:6px}
 @media print{#bar{display:none}body{background:#fff}}
@@ -28,13 +28,24 @@ body{margin:0;background:#f2f2f0;color:#222;font:13px -apple-system,"PingFang SC
 <script>
 var PR=!!window.PRINT,step=0,sc=1,api=new alphaTab.AlphaTabApi(document.getElementById('at'),{core:{fontDirectory:'font/',useWorkers:false},display:{scale:1.0}});
 if(PR){document.getElementById('bar').style.display='none';document.body.style.background='#fff';document.getElementById('at').style.cssText='box-shadow:none;margin:0;max-width:none;padding:0;background:#fff'}
-api.renderFinished.on(function(){if(PR&&step==0){step=1;api.renderTracks(api.score.tracks);return}window.__done=true});
+var READ={spread:1,fit:'w',flow:1},fitKey='';
+function applyLayout(){var s=api.settings.display,hz=READ.flow>=3,at=document.getElementById('at');s.layoutMode=hz?alphaTab.LayoutMode.Horizontal:alphaTab.LayoutMode.Page;s.scale=sc;api.updateSettings();if(!PR){at.style.maxWidth=hz?'none':'';at.style.margin=hz?'14px 0 14px 14px':''}}
+function setCfg(c){READ=c;fitKey='';applyLayout();api.render()}
+function post(){
+  var h=document.documentElement,sf=document.querySelector('.at-surface')||document.getElementById('at'),hz=READ.flow>=3,vh=innerHeight,vw=innerWidth;
+  if(READ.fit==2&&hz){var key=vh+':'+sc,cur=sf.offsetHeight;if(fitKey!=key&&cur>0){fitKey=key;var ns=Math.max(.5,Math.min(3,sc*(vh-110)/cur));if(Math.abs(ns-sc)>.03){sc=ns;document.getElementById('zv').textContent=Math.round(sc*100)+'%';applyLayout();api.render();return}}}
+  [].slice.call(document.querySelectorAll('.snap')).forEach(function(e){e.remove()});
+  h.style.scrollSnapType=READ.flow==2?'y mandatory':(READ.flow==4?'x mandatory':'');
+  var n=READ.flow==2?Math.ceil(h.scrollHeight/vh):(READ.flow==4?Math.ceil(h.scrollWidth/vw):0);
+  for(var i=0;i<n;i++){var d=document.createElement('div');d.className='snap';d.style.cssText='position:absolute;width:1px;height:1px;scroll-snap-align:start;'+(READ.flow==2?'left:0;top:'+i*vh+'px':'top:0;left:'+i*vw+'px');document.body.appendChild(d)}
+}
+api.renderFinished.on(function(){if(PR&&step==0){step=1;api.renderTracks(api.score.tracks);return}window.__done=true;if(!PR)post()});
 api.scoreLoaded.on(function(s){var t=document.getElementById('tr');t.innerHTML='';
   s.tracks.forEach(function(k,i){var o=document.createElement('option');o.value=i;o.textContent=(i+1)+'. '+(k.name||'Track');t.appendChild(o)});document.title=s.title||''});
 document.getElementById('tr').onchange=function(){api.renderTracks([api.score.tracks[this.value]])};
 api.error.on(function(e){window.__err=true;document.getElementById('at').textContent='Error: '+(e&&e.message?e.message:e)});
 function z(d){sc=Math.max(.5,Math.min(2,sc+d));api.settings.display.scale=sc;api.updateSettings();api.render();document.getElementById('zv').textContent=Math.round(sc*100)+'%'}
-function loadScore(b){var s=atob(b),a=new Uint8Array(s.length);for(var i=0;i<s.length;i++)a[i]=s.charCodeAt(i);api.load(a)}
+function loadScore(b){var s=atob(b),a=new Uint8Array(s.length);for(var i=0;i<s.length;i++)a[i]=s.charCodeAt(i);applyLayout();api.load(a)}
 </script>
 V
 else echo "提示:未能下载 alphaTab,吉他谱查看功能将不可用(其余功能不受影响)"; fi

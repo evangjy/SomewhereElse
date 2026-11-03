@@ -7,6 +7,16 @@ var isEN: Bool = UserDefaults.standard.string(forKey: "ui").map { $0 == "en" } ?
 let enStr: [String: String] = [
   "未命名": "Untitled",
   "新建…": "New…",
+  "版面": "Layout",
+  "阅读": "Reading",
+  "单页": "Single Page",
+  "双页": "Two Pages",
+  "适应宽度": "Fit Width",
+  "适应高度": "Fit Height",
+  "竖向滚动": "Vertical Scroll",
+  "竖向分页": "Vertical Paging",
+  "横向滚动": "Horizontal Scroll",
+  "横向分页": "Horizontal Paging",
   "关闭…": "Close…",
   "显示/隐藏侧边栏": "Show / Hide Sidebar",
   "还没有打开文件夹": "No folder open",
@@ -516,6 +526,36 @@ func mdPage(_ src: String, _ base: URL?) -> String {
   return "<!doctype html><meta charset=utf-8><meta name=color-scheme content=\"light dark\">" + b + "<style>" + mdCSS + "</style>" + mdHTML(src)
 }
 
+// MARK: 阅读显示模式(顶部「阅读」菜单):单页/双页 · 适应宽度/高度 · 竖向滚动/竖向分页/横向滚动/横向分页
+enum Read {
+  static var spread: Int { UserDefaults.standard.integer(forKey: "read.spread") == 2 ? 2 : 1 }   // 1 单页 2 双页
+  static var fit: Int { UserDefaults.standard.integer(forKey: "read.fit") == 2 ? 2 : 1 }          // 1 适应宽度 2 适应高度
+  static var flow: Int { let v = UserDefaults.standard.integer(forKey: "read.flow"); return (1...4).contains(v) ? v : 1 }   // 1 竖滚 2 竖分页 3 横滚 4 横分页
+  static var json: String { "{spread:" + String(spread) + ",fit:'" + (fit == 1 ? "w" : "h") + "',flow:" + String(flow) + "}" }
+}
+final class ReadPDF: PDFView {   // PDF:交给 PDFKit 的页面布局,并按「适应宽度/高度」计算缩放
+  func configure() {
+    let cont = Read.flow == 1 || Read.flow == 3, two = Read.spread == 2
+    displayMode = two ? (cont ? .twoUpContinuous : .twoUp) : (cont ? .singlePageContinuous : .singlePage)
+    displayDirection = Read.flow >= 3 ? .horizontal : .vertical
+    displaysPageBreaks = true; autoScales = false; minScaleFactor = 0.1; maxScaleFactor = 8
+    applyFit()
+  }
+  func applyFit() {
+    guard bounds.width > 40, let pg = currentPage ?? document?.page(at: 0) else { return }
+    let r = pg.bounds(for: .cropBox), cols: CGFloat = Read.spread == 2 ? 2 : 1, m: CGFloat = 24
+    let s = Read.fit == 1 ? (bounds.width - 2 * m - (cols - 1) * 12) / (r.width * cols) : (bounds.height - 2 * m) / r.height
+    if s > 0.05, abs(scaleFactor - s) > 0.002 { scaleFactor = s }
+  }
+  override func layout() { super.layout(); applyFit() }
+  override func keyDown(with e: NSEvent) {   // 横向分页:← → 翻页
+    if Read.flow == 4, e.keyCode == 123 || e.keyCode == 124 { if e.keyCode == 124 { goToNextPage(nil) } else { goToPreviousPage(nil) }; return }
+    super.keyDown(with: e)
+  }
+  override func swipe(with e: NSEvent) {
+    if Read.flow == 4 { if e.deltaX > 0 { goToNextPage(nil) } else { goToPreviousPage(nil) } } else { super.swipe(with: e) }
+  }
+}
 // MARK: 编辑区:拦截文件拖放;Markdown 下拖入图片 = 在光标处插入 ![](路径)
 let imgExts: Set<String> = ["png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "heic", "heif", "ico", "svg"]
 func relPath(_ target: URL, from dir: URL) -> String {
@@ -529,6 +569,26 @@ final class EditView: NSTextView {
   override init(frame: NSRect) { super.init(frame: frame); registerForDraggedTypes([.fileURL]) }
   required init?(coder: NSCoder) { fatalError() }
   override func updateDragTypeRegistration() { super.updateDragTypeRegistration(); registerForDraggedTypes([.fileURL]) }
+  override func menu(for event: NSEvent) -> NSMenu? {   // 去掉 字体 / 拼写和语法 / 替换 / 语音 / 布局方向 / 自动填充
+    guard let m = super.menu(for: event) else { return nil }
+    let titles: Set<String> = ["Font", "Spelling and Grammar", "Substitutions", "Speech", "Layout Direction", "AutoFill", "字体", "拼写和语法", "替换", "语音", "布局方向", "自动填充"]
+    let acts: Set<String> = ["orderFrontFontPanel:", "orderFrontStylesPanel:", "addFontTrait:", "modifyFont:", "underline:", "copyFont:", "pasteFont:",
+      "showGuessPanel:", "checkSpelling:", "toggleContinuousSpellChecking:", "toggleGrammarChecking:", "toggleAutomaticSpellingCorrection:",
+      "orderFrontSubstitutionsPanel:", "toggleSmartInsertDelete:", "toggleAutomaticQuoteSubstitution:", "toggleAutomaticDashSubstitution:",
+      "toggleAutomaticLinkDetection:", "toggleAutomaticDataDetection:", "toggleAutomaticTextReplacement:", "startSpeaking:", "stopSpeaking:",
+      "makeBaseWritingDirectionNatural:", "makeBaseWritingDirectionLeftToRight:", "makeBaseWritingDirectionRightToLeft:"]
+    for it in m.items.reversed() {
+      let hit = (it.submenu?.items ?? []).contains { sub in sub.action.map { acts.contains(NSStringFromSelector($0)) } ?? false }
+      if titles.contains(it.title) || hit { m.removeItem(it) }
+    }
+    while let f = m.items.first, f.isSeparatorItem { m.removeItem(f) }
+    while let l = m.items.last, l.isSeparatorItem { m.removeItem(l) }
+    var k = 1; while k < m.items.count { if m.items[k].isSeparatorItem && m.items[k - 1].isSeparatorItem { m.removeItem(at: k) } else { k += 1 } }
+    return m
+  }
+  // 右键只弹菜单,不改动选区(默认行为会在空白处选中光标所在行及其后的内容)
+  override func rightMouseDown(with e: NSEvent) { if let m = menu(for: e) { NSMenu.popUpContextMenu(m, with: e, for: self) } }
+  override func mouseDown(with e: NSEvent) { if e.modifierFlags.contains(.control) { rightMouseDown(with: e) } else { super.mouseDown(with: e) } }
   func files(_ s: NSDraggingInfo) -> [URL] {
     (s.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
   }
@@ -1402,7 +1462,8 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
   let encPop = NSButton()
   let chatHost = NSView(), chatBtn = RoundButton()
   var chat: ChatPane?
-  var gpB64: String?
+  var pdfView: ReadPDF?
+  var gpB64: String?, gpWeb: WKWebView?
   var sideShown = false, sideBtn = SideToggle()   // 侧边栏是否展开(与是否有文件夹分开)
   var folder: URL?   // 本窗口(同一组标签页)侧边栏显示的文件夹
   var trailFull: NSLayoutConstraint!, trailChat: NSLayoutConstraint!, chatW: NSLayoutConstraint!
@@ -1520,11 +1581,11 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
     NSLayoutConstraint.activate([w.topAnchor.constraint(equalTo: area.topAnchor), w.leadingAnchor.constraint(equalTo: area.leadingAnchor),
       w.trailingAnchor.constraint(equalTo: area.trailingAnchor), w.bottomAnchor.constraint(equalTo: area.bottomAnchor)])
     w.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent())
-    gpB64 = d.base64EncodedString(); status.stringValue = T("吉他谱(只读预览)")
+    gpWeb = w; gpB64 = d.base64EncodedString(); status.stringValue = T("吉他谱(只读预览)")
   }
   func webView(_ w: WKWebView, didFinish navigation: WKNavigation!) {
     guard let b = gpB64 else { return }; gpB64 = nil
-    w.evaluateJavaScript("loadScore('" + b + "')", completionHandler: nil)
+    w.evaluateJavaScript("READ=" + Read.json + ";loadScore('" + b + "')", completionHandler: nil)
   }
   func setFolder(_ u: URL?) {   // 同一窗口的所有标签页共用一个文件夹
     for d in docs where d.win.tabbingIdentifier == win.tabbingIdentifier { d.folder = u; if u != nil { d.sideShown = true }; d.updateSidebar() }
@@ -1564,11 +1625,12 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
       return
     }
     if u.pathExtension.lowercased() == "pdf" {
-      let p = PDFView(); p.document = PDFDocument(url: u); p.autoScales = true
+      let p = ReadPDF(); p.document = PDFDocument(url: u)
       p.translatesAutoresizingMaskIntoConstraints = false; scroll.isHidden = true; encPop.isHidden = true; status.stringValue = T("PDF(只读预览)")
       area.addSubview(p)
       NSLayoutConstraint.activate([p.topAnchor.constraint(equalTo: area.topAnchor), p.leadingAnchor.constraint(equalTo: area.leadingAnchor),
         p.trailingAnchor.constraint(equalTo: area.trailingAnchor), p.bottomAnchor.constraint(equalTo: area.bottomAnchor)])
+      pdfView = p; p.configure()
       return
     }
     if ["png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "heic", "heif", "ico", "icns"].contains(u.pathExtension.lowercased()), let img = NSImage(contentsOf: u) {
@@ -1611,6 +1673,10 @@ final class Doc: NSObject, NSWindowDelegate, NSTextViewDelegate, WKNavigationDel
     guard let l = lang, full.length < 1_500_000 else { return }
     for (re, c) in l.rules { re.enumerateMatches(in: s, range: full) { m, _, _ in
       if let r = m?.range { lm.addTemporaryAttribute(.foregroundColor, value: c, forCharacterRange: r) } } }
+  }
+  func applyReadOptions() {   // 「版面」菜单改动后立即生效(只作用于 PDF 与吉他谱)
+    pdfView?.configure()
+    gpWeb?.evaluateJavaScript("setCfg(" + Read.json + ")", completionHandler: nil)
   }
   func setReading(_ on: Bool) {   // 阅读 / 编辑(仅 Markdown)
     if !on {
@@ -1784,7 +1850,12 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVali
     e.addItem(.separator())
     add(e, T("删除重复行"), #selector(dedupe)); add(e, T("去除行尾空白"), #selector(trim))
     let v = sub(T("视图"))
-    add(v, T("自动换行"), #selector(toggleWrap), "w", [.option]); add(v, T("放大"), #selector(bigger), "+"); add(v, T("缩小"), #selector(smaller), "-"); add(v, T("切换阅读/编辑模式"), #selector(toggleRead), "."); add(v, T("AI 协作"), #selector(toggleAI), "a", [.command, .option]); add(v, T("显示/隐藏侧边栏"), #selector(toggleSideCmd), "s", [.command, .option])
+    add(v, T("自动换行"), #selector(toggleWrap), "w", [.option]); add(v, T("放大"), #selector(bigger), "+"); add(v, T("缩小"), #selector(smaller), "-"); add(v, T("切换阅读/编辑模式"), #selector(toggleRead), "."); add(v, T("AI 协作"), #selector(toggleAI), "a", [.command, .option])
+    let rd = sub(T("版面"))
+    func ro(_ t: String, _ tag: Int, _ on: Bool) { add(rd, T(t), #selector(readOpt(_:)), "", [], tag: tag); rd.items.last?.state = on ? .on : .off }
+    ro("单页", 11, Read.spread == 1); ro("双页", 12, Read.spread == 2); rd.addItem(.separator())
+    ro("适应宽度", 21, Read.fit == 1); ro("适应高度", 22, Read.fit == 2); rd.addItem(.separator())
+    ro("竖向滚动", 31, Read.flow == 1); ro("竖向分页", 32, Read.flow == 2); ro("横向滚动", 33, Read.flow == 3); ro("横向分页", 34, Read.flow == 4)
     let w = sub(T("窗口")); w.delegate = self; NSApp.windowsMenu = w   // 仅保留系统提供的 Fill / Center / Move & Resize / Full Screen Tile
   }
   func menuWillOpen(_ m: NSMenu) { prune(m) }
@@ -1804,13 +1875,16 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVali
   }
   @objc func openSettings() { Settings.shared.show() }
   @objc func toggleAI() { cur()?.toggleChat() }
-  @objc func toggleSideCmd() { cur()?.toggleSide() }
   func ur() -> UndoManager? { (NSApp.keyWindow?.firstResponder as? NSTextView)?.undoManager }   // 作用于当前输入框(编辑区 / 聊天框 / 设置)
   @objc func undoCmd() { ur()?.undo() }
   @objc func redoCmd() { ur()?.redo() }
   func validateMenuItem(_ i: NSMenuItem) -> Bool {
     if i.action == #selector(undoCmd) { return ur()?.canUndo ?? false }
     if i.action == #selector(redoCmd) { return ur()?.canRedo ?? false }
+    if i.action == #selector(readOpt(_:)) {   // 版面:PDF 全部可用;吉他谱不支持单页/双页;其他格式整体置灰
+      guard let d = cur() else { return false }
+      return d.pdfView != nil || (d.gpWeb != nil && i.tag / 10 != 1)
+    }
     return true
   }
   @objc func newDoc() { _ = Doc(nil) }
@@ -1852,6 +1926,12 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemVali
   @objc func dedupe() { xf { var seen = Set<String>(); return $0.components(separatedBy: "\n").filter { seen.insert($0).inserted }.joined(separator: "\n") } }
   @objc func trim() { xf { $0.components(separatedBy: "\n").map { l in l.replacingOccurrences(of: #"[ \t]+$"#, with: "", options: .regularExpression) }.joined(separator: "\n") } }
   @objc func toggleWrap() { guard let d = cur() else { return }; d.setWrap(!d.wrap) }
+  @objc func readOpt(_ i: NSMenuItem) {   // tag = 组*10 + 值:1 页数 · 2 适应 · 3 翻页方式
+    guard let cd = cur(), cd.pdfView != nil || cd.gpWeb != nil else { return }   // 其他格式下什么都不改变
+    let d = UserDefaults.standard, g = i.tag / 10, v = i.tag % 10
+    d.set(v, forKey: g == 1 ? "read.spread" : (g == 2 ? "read.fit" : "read.flow"))
+    buildMenu(); docs.forEach { $0.applyReadOptions() }
+  }
   @objc func toggleRead() {
     guard let c = cur() else { return }
     let md = docs.filter { $0.lang?.name == "Markdown" && ($0.reading || !$0.scroll.isHidden) }
